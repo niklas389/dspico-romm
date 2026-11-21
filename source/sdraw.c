@@ -212,3 +212,210 @@ bool sdraw_write(uint32_t lba, const void *src, uint32_t count, bool dma)
     cache_sector_invalidate(0, lba, lba + count - 1); // DEV_DLDI
     return ok;
 }
+
+// ---------------------------------------------------------------------------
+// Interrupt-driven sequential writes (sdraw_async_*)
+//
+// Sector i goes to the card by DMA; the card's transfer-complete IRQ then
+// polls the status of sector i-1 (a 4-byte read, a few microseconds) and
+// starts sector i+1. While the DSpico is still busy, timer 1 retries the
+// status read 30 us later. The CPU is only needed for those short steps.
+// ---------------------------------------------------------------------------
+
+#define SDRAW_TIMER 1
+
+enum { AS_IDLE, AS_SENDING, AS_POLL_PREV, AS_POLL_LAST, AS_DONE, AS_ERROR };
+
+static volatile int as_state = AS_IDLE;
+static uint32_t as_lba, as_count, as_i;
+static const uint32_t *as_src;
+static volatile uint32_t as_irqs, as_polls;
+static bool as_ready;
+
+static void as_send(void)
+{
+    uint32_t i = as_i;
+    bool first = i == 0, last = i == as_count - 1;
+
+    R_AUXSPICNTH = 0xC0; // ROM mode + transfer-complete IRQ
+    R_CMD[0] = 0xF6;
+    R_CMD[1] = 0xE1;
+    R_CMD[2] = 0x0D;
+    R_CMD[3] = 0x98 | (first ? 2 : 0) | (last ? 1 : 0);
+    uint32_t lba = as_lba + i;
+    R_CMD[4] = lba >> 24;
+    R_CMD[5] = lba >> 16;
+    R_CMD[6] = lba >> 8;
+    R_CMD[7] = lba;
+
+    DMA_CR(SDRAW_DMA) = 0;
+    DMA_SRC(SDRAW_DMA) = (uint32_t)(as_src + i * 128);
+    DMA_DEST(SDRAW_DMA) = (uint32_t)&R_DATA;
+    DMA_CR(SDRAW_DMA) = DMA_ENABLE | DMA_START_CARD | DMA_32_BIT | DMA_REPEAT |
+                        DMA_DST_FIX | DMA_SRC_INC | 1;
+    as_state = AS_SENDING;
+    R_ROMCTRL = DSPICO_WRITE_SETTINGS;
+}
+
+// One status read (IRQs off in the handlers, so this cannot interleave with
+// another card command). Returns 1 done, 0 busy, -1 error.
+static int as_poll_once(void)
+{
+    as_polls++;
+    R_AUXSPICNTH = 0x80; // no IRQ for the poll itself
+    R_CMD[0] = 0xE4;
+    for (int k = 1; k < 8; k++)
+        R_CMD[k] = 0;
+    R_ROMCTRL = DSPICO_POLL_SETTINGS;
+    if (!wait_set(ROMCTRL_DRQ))
+        return -1;
+    uint32_t st = R_DATA;
+    if (!wait_clear(ROMCTRL_BUSY))
+        return -1;
+    return st != 0;
+}
+
+static void as_finish(int state)
+{
+    as_state = state;
+    cache_sector_invalidate(0, as_lba, as_lba + as_count - 1);
+}
+
+static void as_timer_irq(void);
+
+static void as_step_poll(void)
+{
+    int r = as_poll_once();
+    if (r < 0)
+    {
+        as_finish(AS_ERROR);
+        return;
+    }
+    if (r == 0)
+    {
+        // Still writing: try again in ~30 us
+        timerStart(SDRAW_TIMER, ClockDivider_1, TIMER_FREQ(33000), as_timer_irq);
+        return;
+    }
+    if (as_state == AS_POLL_LAST)
+    {
+        as_finish(AS_DONE);
+        return;
+    }
+    // Sector as_i - 1 is done (or as_i was the first): send the next one
+    as_i++;
+    if (as_i < as_count)
+    {
+        as_send();
+    }
+    else
+    {
+        as_state = AS_POLL_LAST;
+        as_step_poll();
+    }
+}
+
+static void as_timer_irq(void)
+{
+    timerStop(SDRAW_TIMER);
+    as_irqs++;
+    if (as_state == AS_POLL_PREV || as_state == AS_POLL_LAST)
+        as_step_poll();
+}
+
+static void as_card_irq(void)
+{
+    as_irqs++;
+    if (as_state != AS_SENDING)
+        return;
+    DMA_CR(SDRAW_DMA) = 0;
+    if (as_i == 0)
+    {
+        // First sector: nothing to wait for yet
+        as_i++;
+        if (as_i < as_count)
+            as_send();
+        else
+        {
+            as_state = AS_POLL_LAST;
+            as_step_poll();
+        }
+        return;
+    }
+    as_state = AS_POLL_PREV; // wait for sector as_i - 1
+    as_step_poll();
+}
+
+// The DLDI driver must not touch the card while a write sequence runs.
+static FN_MEDIUM_WRITESECTORS dldi_write_orig;
+static FN_MEDIUM_READSECTORS dldi_read_orig;
+
+static bool dldi_write_guard(sec_t sector, sec_t num, const void *buf)
+{
+    while (sdraw_async_busy())
+        ;
+    return dldi_write_orig(sector, num, buf);
+}
+
+static bool dldi_read_guard(sec_t sector, sec_t num, void *buf)
+{
+    while (sdraw_async_busy())
+        ;
+    return dldi_read_orig(sector, num, buf);
+}
+
+bool sdraw_async_init(void)
+{
+    if (as_ready)
+        return true;
+    if (!sdraw_is_dspico())
+        return false;
+    DLDI_INTERFACE *io = (DLDI_INTERFACE *)io_dldi_data;
+    dldi_write_orig = io->ioInterface.writeSectors;
+    dldi_read_orig = io->ioInterface.readSectors;
+    io->ioInterface.writeSectors = dldi_write_guard;
+    io->ioInterface.readSectors = dldi_read_guard;
+
+    timerStop(SDRAW_TIMER);
+    irqSet(IRQ_TIMER(SDRAW_TIMER), as_timer_irq);
+    irqEnable(IRQ_TIMER(SDRAW_TIMER));
+    irqSet(IRQ_CARD, as_card_irq);
+    irqEnable(IRQ_CARD);
+    as_ready = true;
+    return true;
+}
+
+bool sdraw_async_start(uint32_t lba, const void *src, uint32_t count)
+{
+    if (!as_ready || sdraw_async_busy() || count == 0 || lba == 0 ||
+        ((uintptr_t)src & 3) != 0)
+        return false;
+    DC_FlushRange(src, count * 512);
+    if (!wait_clear(ROMCTRL_BUSY))
+        return false;
+    int old = enterCriticalSection();
+    as_lba = lba;
+    as_src = src;
+    as_count = count;
+    as_i = 0;
+    as_send();
+    leaveCriticalSection(old);
+    return true;
+}
+
+bool sdraw_async_busy(void)
+{
+    int s = as_state;
+    return s == AS_SENDING || s == AS_POLL_PREV || s == AS_POLL_LAST;
+}
+
+bool sdraw_async_ok(void)
+{
+    return as_state != AS_ERROR;
+}
+
+void sdraw_async_stats(uint32_t *irqs, uint32_t *polls)
+{
+    *irqs = as_irqs;
+    *polls = as_polls;
+}

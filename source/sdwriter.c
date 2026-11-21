@@ -7,6 +7,7 @@
 #include <nds.h>
 
 #include "prof.h"
+#include "sdraw.h"
 
 // Arbitrary, unique signal IDs for cothread_yield_signal().
 #define SIG_DATA  0x53445744u // "SDWD": data available for the writer
@@ -27,7 +28,80 @@ struct sdwriter
     volatile bool failed;
     uint64_t write_ticks;
     uint64_t stall_ticks;
+
+    // Raw mode: interrupt-driven DSpico DMA writes into the file's sectors
+    const sdraw_extent_t *ext;
+    int n_ext;
+    uint32_t file_sector;  // Next sector of the file to write
+    uint32_t sum;          // Checksum of everything written (sdw_checksum)
 };
+
+// Word-wise checksum of the data stream (speed test verification). Data
+// arrives in pieces that are multiples of 4 bytes except at the very end.
+static uint32_t checksum_add(uint32_t sum, const uint8_t *p, size_t n)
+{
+    size_t w = n / 4;
+    const uint32_t *q = (const uint32_t *)p;
+    for (size_t i = 0; i < w; i++)
+        sum = sum * 31u + q[i];
+    for (size_t i = w * 4; i < n; i++)
+        sum = sum * 31u + p[i];
+    return sum;
+}
+
+// Maps the next file sector to an LBA; *run = sectors left in that extent.
+static uint32_t raw_lba(const sdwriter_t *w, uint32_t *run)
+{
+    uint32_t s = w->file_sector;
+    for (int i = 0; i < w->n_ext; i++)
+    {
+        if (s < w->ext[i].count)
+        {
+            *run = w->ext[i].count - s;
+            return w->ext[i].lba + s;
+        }
+        s -= w->ext[i].count;
+    }
+    *run = 0;
+    return 0;
+}
+
+static bool raw_write(sdwriter_t *w, const uint8_t *src, size_t n)
+{
+    static uint32_t pad[128] __attribute__((aligned(32)));
+    while (n > 0)
+    {
+        uint32_t run;
+        uint32_t lba = raw_lba(w, &run);
+        if (!lba)
+            return false; // Past the allocated sectors
+        const uint8_t *p = src;
+        uint32_t sectors = n / 512;
+        if (sectors == 0)
+        {
+            // Final partial sector: pad with zeros (beyond the file size)
+            memset(pad, 0, sizeof(pad));
+            memcpy(pad, src, n);
+            p = (const uint8_t *)pad;
+            sectors = 1;
+        }
+        if (sectors > run)
+            sectors = run;
+
+        if (!sdraw_async_start(lba, p, sectors))
+            return false;
+        while (sdraw_async_busy())
+            cothread_yield(); // The network thread runs meanwhile
+        if (!sdraw_async_ok())
+            return false;
+
+        size_t bytes = sectors * 512 < n ? sectors * 512 : n;
+        w->file_sector += sectors;
+        src += bytes;
+        n -= bytes;
+    }
+    return true;
+}
 
 static int writer_thread(void *arg)
 {
@@ -51,10 +125,16 @@ static int writer_thread(void *arg)
         if (n > until_end)
             n = until_end;
 
+        // Raw writes need whole sectors except for the final piece
+        if (w->ext && n >= 512)
+            n &= ~(size_t)511;
+
         if (!w->failed)
         {
+            w->sum = checksum_add(w->sum, w->ring + w->tail, n);
             uint64_t t0 = prof_ticks();
-            if (fwrite(w->ring + w->tail, 1, n, w->fp) != n)
+            if (w->ext ? !raw_write(w, w->ring + w->tail, n)
+                       : fwrite(w->ring + w->tail, 1, n, w->fp) != n)
                 w->failed = true;
             w->write_ticks += prof_ticks() - t0;
         }
@@ -95,6 +175,30 @@ sdwriter_t *sdw_open(FILE *fp, size_t ring_size, size_t chunk)
         return NULL;
     }
     return w;
+}
+
+sdwriter_t *sdw_open_raw(FILE *fp, size_t ring_size, size_t chunk,
+                         const sdraw_extent_t *ext, int n_ext)
+{
+    if (!sdraw_async_init())
+        return NULL;
+    sdwriter_t *w = sdw_open(fp, ring_size, chunk);
+    if (w)
+    {
+        w->ext = ext;
+        w->n_ext = n_ext;
+    }
+    return w;
+}
+
+uint32_t sdw_checksum(const sdwriter_t *w)
+{
+    return w->sum;
+}
+
+uint32_t sdw_checksum_data(uint32_t sum, const void *data, size_t n)
+{
+    return checksum_add(sum, data, n);
 }
 
 bool sdw_write(sdwriter_t *w, const void *data, size_t len)
@@ -160,7 +264,7 @@ void sdw_commit(sdwriter_t *w, size_t n)
         cothread_send_signal(SIG_DATA);
 }
 
-bool sdw_close(sdwriter_t *w)
+bool sdw_close_sum(sdwriter_t *w, uint32_t *sum)
 {
     w->closing = true;
     while (!w->finished)
@@ -170,9 +274,16 @@ bool sdw_close(sdwriter_t *w)
     }
 
     bool ok = !w->failed;
+    if (sum)
+        *sum = w->sum;
     free(w->ring);
     free(w);
     return ok;
+}
+
+bool sdw_close(sdwriter_t *w)
+{
+    return sdw_close_sum(w, NULL);
 }
 
 uint64_t sdw_write_ticks(const sdwriter_t *w)

@@ -28,6 +28,18 @@ bool sdw_write(sdwriter_t *w, const void *data, size_t len);
 void *sdw_reserve(sdwriter_t *w, size_t *avail);
 void sdw_commit(sdwriter_t *w, size_t n);
 
+// Raw mode: the data goes to the file's sectors (from sdraw_map) with
+// interrupt-driven DSpico DMA writes instead of fwrite(). DSpico only.
+#include "sdraw.h"
+sdwriter_t *sdw_open_raw(FILE *fp, size_t ring_size, size_t chunk,
+                         const sdraw_extent_t *ext, int n_ext);
+
+// Checksum of all data written so far, and the same function for checking
+// a file read back (start with sum = 0).
+uint32_t sdw_checksum(const sdwriter_t *w);
+bool sdw_close_sum(sdwriter_t *w, uint32_t *sum); // sdw_close + final checksum
+uint32_t sdw_checksum_data(uint32_t sum, const void *data, size_t n);
+
 // Waits until everything is written, stops the thread, frees the writer.
 // Does not close fp. Returns false if any write failed.
 bool sdw_close(sdwriter_t *w);

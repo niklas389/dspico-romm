@@ -79,7 +79,8 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
-| 0.25 | ? | ? | sequential raw DSpico writes; ARM7 fast path only while associated |
+| 0.26 | ? | ? | interrupt-driven DSpico DMA SD writer (`dl SDraw`), ARM7 safety poll removed |
+| 0.25 | – | – | raw sequential writes 3079 (CPU) / 2976 (DMA) KB/s, verified; Wi-Fi died during the downloads (ARM7 4 ms poll) |
 | 0.24 | 966 | 918 (961 ARM7 prio) | raw DSpico writes verified (CPU and DMA) but 150 KB/s single-sector; one Wi-Fi connect hang |
 | 0.23 | **1144** | 892 (932 with ARM7 bus priority) | ARM7 burst copy: ring copy 375 -> 113 us per packet |
 | 0.22 | **935** | **901** | safe variant: no status polling loop (CMD52 30 -> 3 per packet); the CMD53 variant did not connect |

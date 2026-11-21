@@ -650,9 +650,22 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
 
 // Like run_net_sd, but SD writes run in a background cothread while the main
 // thread waits for the network.
+static bool run_net_sd_async_x(const config_t *cfg, const char *path, uint64_t len,
+                               const char *label, bool sample, bool use_dl, bool raw,
+                               net_row_t *row);
+
 static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len,
                              const char *label, bool sample, bool use_dl,
                              net_row_t *row)
+{
+    return run_net_sd_async_x(cfg, path, len, label, sample, use_dl, false, row);
+}
+
+// raw: SD writes with interrupt-driven DSpico DMA (sdraw), then the file is
+// read back and compared with the checksum of what was written.
+static bool run_net_sd_async_x(const config_t *cfg, const char *path, uint64_t len,
+                               const char *label, bool sample, bool use_dl, bool raw,
+                               net_row_t *row)
 {
     log_printf("%s...\n", label);
 
@@ -664,17 +677,33 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     memset(row, 0, sizeof(*row));
     row->label = label;
 
-    FILE *f = fopen(file, "wb");
+    FILE *f = fopen(file, raw ? "w+b" : "wb"); // raw: read back afterwards
     if (!f)
     {
         log_printf("  can't create %s\n", file);
         return true;
     }
     setvbuf(f, NULL, _IONBF, 0); // The writer already writes in chunks
-    if (!sd_preallocate(f, len))
+    static sdraw_extent_t ext[64];
+    int n_ext = 0;
+    if (raw)
+    {
+        n_ext = sdraw_map(f, len, ext, 64);
+        if (n_ext <= 0)
+        {
+            log_printf("  map failed\n");
+            fclose(f);
+            remove(file);
+            return true;
+        }
+        log_file_only("  raw: %d extent(s), first LBA %lu\n", n_ext,
+                      (unsigned long)ext[0].lba);
+    }
+    else if (!sd_preallocate(f, len))
         log_printf("  preallocation failed\n");
 
-    sdwriter_t *w = sdw_open(f, 1024 * 1024, 32 * 1024);
+    sdwriter_t *w = raw ? sdw_open_raw(f, 1024 * 1024, 32 * 1024, ext, n_ext)
+                        : sdw_open(f, 1024 * 1024, 32 * 1024);
     if (!w)
     {
         log_printf("  writer init failed\n");
@@ -700,13 +729,34 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     // Count the time to drain the ring: the download isn't done before that.
     uint64_t t0 = prof_ticks();
     uint64_t stall_ticks = sdw_stall_ticks(w);
-    bool wok = sdw_close(w); // Drains the ring, then frees the writer
+    uint32_t sum = 0;
+    bool wok = sdw_close_sum(w, &sum); // Drains the ring, then frees the writer
     uint32_t drain_ms = prof_ticks_to_ms(prof_ticks() - t0);
     g_memcpy_stats_on = 0;
     if (sample)
     {
         save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
         memcpy_stats_log("sd");
+    }
+    // Raw writes bypass FatFs: read the file back and compare
+    bool vok = true;
+    if (raw && wok)
+    {
+        static uint32_t vb[8192] __attribute__((aligned(32)));
+        uint32_t vsum = 0;
+        size_t got;
+        fseek(f, 0, SEEK_SET);
+        uint64_t total = 0;
+        while ((got = fread(vb, 1, sizeof(vb), f)) > 0)
+        {
+            vsum = sdw_checksum_data(vsum, vb, got);
+            total += got;
+        }
+        vok = vsum == sum && total == len;
+        uint32_t irqs, polls;
+        sdraw_async_stats(&irqs, &polls);
+        log_printf("  raw verify %s (%llu B), %lu IRQs, %lu polls\n", vok ? "ok" : "MISMATCH",
+                   (unsigned long long)total, (unsigned long)irqs, (unsigned long)polls);
     }
     fclose(f);
     stats_delta(row, &st);
@@ -716,7 +766,7 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     uint32_t total_ms = r.total_ms + drain_ms;
     prof_fill(row, total_ms);
     row->sd_pct = 0; // SD time overlaps the wait; reported separately below
-    row->ok = ok && wok && r.body_bytes == len && r.status == 206;
+    row->ok = ok && wok && vok && r.body_bytes == len && r.status == 206;
     row->raw_kbps = kbps(r.body_bytes, total_ms);
     row->steady_kbps = row->raw_kbps;
     if (use_dl)
@@ -812,16 +862,10 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
-    // A/B: main RAM bus priority to the ARM7 (EXMEMCNT bit 15), which copies
-    // every received packet into main RAM while the ARM9 decrypts/writes SD.
-    if (go)
-    {
-        REG_EXMEMCNT |= BIT(15);
-        go = run_dl_net("dl net7", path, len, false, &rows[nrows++]);
-        if (go)
-            go = run_net_sd_async(cfg, path, len, "dl SD7", false, true, &rows[nrows++]);
-        REG_EXMEMCNT &= ~BIT(15);
-    }
+    // SD writes with interrupt-driven DSpico DMA instead of the DLDI driver
+    if (go && sdraw_is_dspico())
+        go = run_net_sd_async_x(cfg, path, len, "dl SDraw", false, true, true,
+                                &rows[nrows++]);
 
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);

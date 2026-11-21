@@ -34,4 +34,12 @@ int sdraw_map(FILE *f, uint32_t size, sdraw_extent_t *ext, int max_ext);
 // Returns false on a timeout. Drops libnds' cached copies of these sectors.
 bool sdraw_write(uint32_t lba, const void *src, uint32_t count, bool dma);
 
+// Interrupt-driven sequential write with DMA (card transfer IRQ + timer 1).
+// sdraw_async_init() also makes the DLDI driver wait while a write runs.
+bool sdraw_async_init(void);
+bool sdraw_async_start(uint32_t lba, const void *src, uint32_t count);
+bool sdraw_async_busy(void);
+bool sdraw_async_ok(void);       // Last sequence completed without error
+void sdraw_async_stats(uint32_t *irqs, uint32_t *polls);
+
 #endif
