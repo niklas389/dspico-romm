@@ -60,14 +60,20 @@ Select a ROM of at least 8 MB and press **Y**. The suite measures:
   8 MB each, data discarded),
 - optionally plain HTTP, if `http_url=` is set in `config.ini`.
 
-There are two builds, differing only in DSWiFi's TCP receive window:
+- download speed with the body written to the SD card (like a real download),
+- for every test, how many packets the ARM7 had to drop because the
+  ARM7 -> ARM9 ring buffer was full ("lost").
 
-| ROM | TCP window | Single-connection limit |
-| --- | --- | --- |
-| `romm-poc.nds` | 4 x 1460 = 5840 B (stock) | about 5840 B / RTT |
-| `romm-poc-wnd32.nds` | 32 x 1460 = 46720 B | about 8x higher |
+There are three builds, differing only in DSWiFi settings:
 
-Run the suite with both and compare the summaries in `poc.log`.
+| ROM | TCP window | ARM7 -> ARM9 RX buffer | Log file |
+| --- | --- | --- | --- |
+| `romm-poc.nds` | 5840 B (stock) | 12 KiB (stock) | `poc-stock-4x1460-rx12.log` |
+| `romm-poc-wnd32.nds` | 46720 B | 12 KiB | `poc-32x1460-rx12.log` |
+| `romm-poc-rx128.nds` | 46720 B | 128 KiB | `poc-32x1460-rx128.log` |
+
+The patched builds also use a matching ARM7 core, because the RX buffer is
+shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
 
 ## Building
 
@@ -82,7 +88,7 @@ make            # romm-poc.nds
 ```
 
 ```bash
-make variants   # also romm-poc-wnd32.nds (rebuilds DSWiFi, see tools/build_dswifi.sh)
+make variants   # also the patched DSWiFi builds (see tools/build_dswifi.sh)
 ```
 
 GitHub Actions builds `romm-poc.nds` on every push; see the workflow's

@@ -6,6 +6,7 @@
 #include <strings.h>
 
 #include <curl/curl.h>
+#include <dswifi9.h>
 #include <mbedtls/error.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
@@ -432,6 +433,23 @@ bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
 {
     xfer_t x = { .mem = out, .res = res };
     return perform(path, json, auth, true, NULL, &x);
+}
+
+void net_wifi_stats(net_wifi_stats_t *out)
+{
+    out->rx_queued = Wifi_GetStats(WSTAT_RXQUEUEDPACKETS);
+    out->rx_lost = Wifi_GetStats(WSTAT_RXQUEUEDLOST);
+    out->tx_rejected = Wifi_GetStats(WSTAT_TXQUEUEDREJECTED);
+}
+
+bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *fp,
+                        net_progress_fn cb, void *ctx, net_result_t *res)
+{
+    char range[48];
+    snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)first,
+             (unsigned long long)last);
+    xfer_t x = { .fp = fp, .cb = cb, .cb_ctx = ctx, .res = res };
+    return perform(path, NULL, true, false, range, &x);
 }
 
 bool net_download(const char *path, FILE *fp, net_progress_fn cb, void *ctx,

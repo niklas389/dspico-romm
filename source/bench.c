@@ -237,15 +237,31 @@ typedef struct
     uint32_t raw_kbps;     // bytes / wall time
     uint32_t steady_kbps;  // bytes / (wall time - setup)
     uint32_t setup_ms;
+    uint32_t rx_queued;    // ARM7 -> ARM9 packets during the test
+    uint32_t rx_lost;      // ... dropped because the ring buffer was full
     bool ok;
 } net_row_t;
+
+static void stats_delta(net_row_t *row, const net_wifi_stats_t *a)
+{
+    net_wifi_stats_t b;
+    net_wifi_stats(&b);
+    row->rx_queued = b.rx_queued - a->rx_queued;
+    row->rx_lost = b.rx_lost - a->rx_lost;
+    if (b.tx_rejected != a->tx_rejected)
+        log_printf("  TX rejected: %lu\n",
+                   (unsigned long)(b.tx_rejected - a->tx_rejected));
+}
 
 static bool run_net(const char *label, const char *base, const char *path,
                     uint64_t len, int conns, net_row_t *row)
 {
     log_printf("%s...\n", label);
+    net_wifi_stats_t st;
+    net_wifi_stats(&st);
     net_par_result_t r;
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
+    stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
 
     row->label = label;
@@ -262,6 +278,50 @@ static bool run_net(const char *label, const char *base, const char *path,
     if (!r.ok)
         log_printf("  FAILED: %s\n", r.error);
     return strcmp(r.error, "cancelled") != 0;
+}
+
+// Single keep-alive connection, body written to the SD card like a real
+// download. Shows how much SD writes slow down reception.
+static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
+                       net_row_t *row)
+{
+    const char *label = "HTTPS->SD";
+    log_printf("%s...\n", label);
+
+    char dir[CFG_PATH_MAX + 16], file[CFG_PATH_MAX + 48];
+    config_path(cfg, "test", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    snprintf(file, sizeof(file), "%s/dlbench.bin", dir);
+
+    memset(row, 0, sizeof(*row));
+    row->label = label;
+
+    FILE *f = fopen(file, "wb");
+    if (!f)
+    {
+        log_printf("  can't create %s\n", file);
+        return true;
+    }
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+
+    net_wifi_stats_t st;
+    net_wifi_stats(&st);
+    net_result_t r;
+    bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
+    fclose(f);
+    stats_delta(row, &st);
+    remove(file);
+    printf("\x1b[22;0H                    \n");
+
+    row->ok = ok && r.body_bytes == len && r.status == 206;
+    row->raw_kbps = kbps(r.body_bytes, r.total_ms);
+    row->steady_kbps = row->raw_kbps; // Connection is reused: no setup
+    log_file_only("  bytes %llu, total %lu ms, HTTP %ld\n",
+                  (unsigned long long)r.body_bytes, (unsigned long)r.total_ms,
+                  r.status);
+    if (!row->ok)
+        log_printf("  FAILED: %s\n", r.error[0] ? r.error : "short/bad status");
+    return r.curl_code != 42; // CURLE_ABORTED_BY_CALLBACK: user pressed B
 }
 
 void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
@@ -290,13 +350,16 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
 
-    net_row_t rows[4];
+    net_row_t rows[5];
     int nrows = 0;
     const char *labels[3] = { "HTTPS x1", "HTTPS x2", "HTTPS x4" };
     const int conns[3] = { 1, 2, 4 };
     bool go = true;
     for (int i = 0; i < 3 && go; i++)
         go = run_net(labels[i], NULL, path, len, conns[i], &rows[nrows++]);
+
+    if (go)
+        go = run_net_sd(cfg, path, len, &rows[nrows++]);
 
     if (go && cfg->http_url[0])
         go = run_net("HTTP  x1", cfg->http_url, path, len, 1, &rows[nrows++]);
@@ -310,13 +373,18 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
     log_printf("SD write     %lu KB/s\n", (unsigned long)sd);
     log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
-    log_printf("conn      raw  steady setup\n");
+    log_printf("test      raw stdy setup lost\n");
     for (int i = 0; i < nrows; i++)
-        log_printf("%-8s %4lu  %5lu  %4lums%s\n", rows[i].label,
+        log_printf("%-9s%4lu %4lu %4lu %4lu%s\n", rows[i].label,
                    (unsigned long)rows[i].raw_kbps,
                    (unsigned long)rows[i].steady_kbps,
-                   (unsigned long)rows[i].setup_ms, rows[i].ok ? "" : " FAIL");
-    log_printf("(KB/s; steady excludes setup)\n");
+                   (unsigned long)rows[i].setup_ms,
+                   (unsigned long)rows[i].rx_lost, rows[i].ok ? "" : " F");
+    log_printf("(KB/s, ms; lost = dropped pkts)\n");
+    for (int i = 0; i < nrows; i++)
+        log_file_only("  %s: rx_queued %lu, rx_lost %lu\n", rows[i].label,
+                      (unsigned long)rows[i].rx_queued,
+                      (unsigned long)rows[i].rx_lost);
     if (rtt_med)
         log_printf("1-conn limit ~%lu KB/s\n",
                    (unsigned long)kbps(TCP_WND_BYTES, rtt_med));

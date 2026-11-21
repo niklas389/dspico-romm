@@ -33,6 +33,9 @@
 
 static config_t g_cfg;
 
+// One log per build variant, e.g. poc-32x1460-rx128.log
+#define LOG_NAME "poc-" TCP_WND_LABEL ".log"
+
 // ---------------------------------------------------------------------------
 // Small UI helpers
 // ---------------------------------------------------------------------------
@@ -63,7 +66,7 @@ static void press_any_key(void)
 static void fatal(const char *msg)
 {
     log_printf("\nFATAL: %s\n", msg);
-    log_printf("Log: %spoc.log\nPress START to exit\n", g_cfg.base_dir);
+    log_printf("Log: %s" LOG_NAME "\nPress START to exit\n", g_cfg.base_dir);
     log_close();
     while (1)
     {
@@ -200,7 +203,7 @@ static void step_heartbeat(void)
     if (!ok || res.status != 200)
     {
         buf_free(&body);
-        fatal("Heartbeat failed. See poc.log\n(set verbose=1 for TLS trace)");
+        fatal("Heartbeat failed. See log\n(set verbose=1 for TLS trace)");
     }
 
     cJSON *root = cJSON_Parse(body.data);
@@ -442,7 +445,10 @@ static void download_test(int rom_id, const char *fs_name, uint64_t size,
 
     dl_ui_t ui = { 0 };
     net_result_t res;
+    net_wifi_stats_t st0, st1;
+    net_wifi_stats(&st0);
     bool ok = net_download(path, fp, download_progress, &ui, &res);
+    net_wifi_stats(&st1);
 
     uint32_t close_ms = 0;
     if (fp)
@@ -464,6 +470,9 @@ static void download_test(int rom_id, const char *fs_name, uint64_t size,
     }
     if (fp)
         log_printf("  fclose %lu ms\n", (unsigned long)close_ms);
+    log_printf("  rx queued %lu, lost %lu\n",
+               (unsigned long)(st1.rx_queued - st0.rx_queued),
+               (unsigned long)(st1.rx_lost - st0.rx_lost));
     if (ui.cancelled)
         log_printf("  cancelled by user\n");
     else if (!ok)
@@ -668,7 +677,7 @@ int main(int argc, char **argv)
     if (g_cfg.base_dir[0])
     {
         char path[CFG_PATH_MAX + 16];
-        config_path(&g_cfg, "poc.log", path, sizeof(path));
+        config_path(&g_cfg, LOG_NAME, path, sizeof(path));
         log_open(path);
     }
 
@@ -703,7 +712,7 @@ int main(int argc, char **argv)
 
     step_platforms();
 
-    log_printf("\nDone. Log: %spoc.log\n", g_cfg.base_dir);
+    log_printf("\nDone. Log: %s" LOG_NAME "\n", g_cfg.base_dir);
     net_cleanup();
     Wifi_DisconnectAP();
     Wifi_DisableWifi();

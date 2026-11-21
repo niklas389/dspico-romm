@@ -74,6 +74,21 @@ bool net_download_parallel(const char *base_url, const char *path,
                            uint64_t length, int conns, net_progress_fn cb,
                            void *ctx, net_par_result_t *out);
 
+// Like net_download, but only bytes [first, last] (HTTP Range) over the
+// shared keep-alive connection.
+bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *fp,
+                        net_progress_fn cb, void *ctx, net_result_t *res);
+
+// DSWiFi ARM7 -> ARM9 queue counters (cumulative since Wi-Fi init).
+typedef struct
+{
+    uint32_t rx_queued;   // Packets the ARM7 put into the ARM9 ring buffer
+    uint32_t rx_lost;     // Packets dropped because the ring buffer was full
+    uint32_t tx_rejected; // Outgoing packets rejected (TX buffer full)
+} net_wifi_stats_t;
+
+void net_wifi_stats(net_wifi_stats_t *out);
+
 // URL-encodes a path segment. The returned string must be freed with free().
 char *net_escape(const char *s);
 
