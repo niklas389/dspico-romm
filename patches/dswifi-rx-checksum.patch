@@ -1,0 +1,18 @@
+diff --git a/source/arm9/lwip/include/lwipopts.h b/source/arm9/lwip/include/lwipopts.h
+index a2c4f7e..dad9e4f 100644
+--- a/source/arm9/lwip/include/lwipopts.h
++++ b/source/arm9/lwip/include/lwipopts.h
+@@ -173,6 +173,13 @@
+ // Checksum algorithm used by lwIP
+ #define LWIP_CHKSUM_ALGORITHM       2
+ 
++// dspico-romm: don't verify checksums of received packets. Integrity is
++// already covered by the 802.11 FCS, the WPA2 CCMP MIC and the TLS AEAD tag;
++// verifying was ~5% of ARM9 time during downloads.
++#define CHECKSUM_CHECK_IP           0
++#define CHECKSUM_CHECK_TCP          0
++#define CHECKSUM_CHECK_UDP          0
++
+ // Debug options
+ // =============
+ 

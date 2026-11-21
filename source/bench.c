@@ -319,7 +319,7 @@ static bool run_net(const char *label, const char *base, const char *path,
         prof_sampling_start();
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
     if (conns == 1)
-        save_samples(g_bench_cfg, "prof-net.bin");
+        save_samples(g_bench_cfg, "prof-" TCP_WND_LABEL "-net.bin");
     prof_fill(row, r.total_ms);
     stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
@@ -375,7 +375,7 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
         prof_sampling_start();
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
     if (sample)
-        save_samples(cfg, "prof-sd.bin");
+        save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
     prof_fill(row, r.total_ms);
     fclose(f);
     stats_delta(row, &st);

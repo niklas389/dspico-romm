@@ -35,27 +35,31 @@ static volatile uint32_t g_nsamples;
 static uint32_t g_max_samples;
 static volatile bool g_sampling;
 
-static void timer0_irq(void)
+void prof_irq_entry(void); // prof_irq.s, calls prof_irq_c(lr_of_interrupted)
+void prof_irq_c(uint32_t caller_lr);
+
+void prof_irq_c(uint32_t caller_lr)
 {
     g_hi++;
 
-    if (g_sampling && g_nsamples < g_max_samples)
+    if (g_sampling && g_nsamples + 2 <= g_max_samples)
     {
         uintptr_t lr_slot = (uintptr_t)__sp_irq - 4; // Saved lr_irq
         uint32_t pc = *(const volatile uint32_t *)lr_slot - 4;
         g_samples[g_nsamples++] = pc;
+        g_samples[g_nsamples++] = caller_lr;
     }
 }
 
 void prof_init(void)
 {
     // ~60 s of samples at 511 Hz
-    g_max_samples = 32768;
+    g_max_samples = 65536; // (pc, lr) pairs
     g_samples = malloc(g_max_samples * sizeof(uint32_t));
     if (!g_samples)
         g_max_samples = 0;
 
-    timerStart(0, ClockDivider_1, 0, timer0_irq);
+    timerStart(0, ClockDivider_1, 0, prof_irq_entry);
 }
 
 uint64_t prof_ticks(void)
@@ -105,7 +109,7 @@ void prof_sampling_start(void)
 uint32_t prof_sampling_stop(void)
 {
     g_sampling = false;
-    return g_nsamples;
+    return g_nsamples / 2;
 }
 
 bool prof_samples_save(const char *path)
@@ -113,8 +117,10 @@ bool prof_samples_save(const char *path)
     FILE *f = fopen(path, "wb");
     if (!f)
         return false;
+    // Format 2: "PRF2", number of (pc, lr) pairs, pairs.
+    uint32_t hdr[2] = { 0x32465250, g_nsamples / 2 };
     uint32_t n = g_nsamples;
-    bool ok = fwrite(&n, sizeof(n), 1, f) == 1 &&
+    bool ok = fwrite(hdr, sizeof(hdr), 1, f) == 1 &&
               fwrite(g_samples, sizeof(uint32_t), n, f) == n;
     return (fclose(f) == 0) && ok;
 }

@@ -19,6 +19,7 @@
 
 #include <dswifi9.h>
 #include <fat.h>
+#include <nds/arm9/dldi.h>
 #include <nds.h>
 
 #include "bench.h"
@@ -141,6 +142,7 @@ static void step_system_info(void)
 {
     log_printf("dspico-romm PoC %s\n", POC_VERSION);
     log_printf("DSi mode: %s\n", isDSiMode() ? "YES" : "NO (DS mode!)");
+    log_printf("DLDI on: %s\n", dldiGetMode() == DLDI_MODE_ARM7 ? "ARM7" : "ARM9");
 
     if (isDSiMode())
     {
@@ -668,6 +670,10 @@ int main(int argc, char **argv)
     top_init();
     consoleDemoInit(); // Bottom screen text console
 
+#ifdef DLDI_FORCE_ARM9
+    // Run the SD driver on the ARM9 so the ARM7 is free for Wi-Fi.
+    dldiSetMode(DLDI_MODE_ARM9);
+#endif
     if (!fatInitDefault())
     {
         printf("FAT init failed\n");

@@ -9,8 +9,8 @@
 # Targets:
 #   make            romm-poc.nds with the stock DSWiFi (TCP window 5840 B)
 #   make variants   also builds, with a patched DSWiFi (tools/build_dswifi.sh):
-#                     romm-poc-rx128.nds  46720 B TCP window, 128 KiB RX buffer
-#                     romm-poc-rx256.nds  64240 B TCP window, 256 KiB RX buffer
+#                     romm-poc-rx128.nds        46720 B TCP window, 128 KiB RX buffer
+#                     romm-poc-rx128-dldi9.nds  same, SD driver forced onto the ARM9
 
 BLOCKSDS	?= /opt/blocksds/core
 BLOCKSDSEXT	?= /opt/blocksds/external
@@ -32,15 +32,17 @@ INCLUDEDIRS	:= source source/third_party/cjson source/third_party/qrcodegen
 ARM7ELF		?= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
 
 LIBS		:= -ldswifi9 -lnds9 -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz \
-		   -Wl,--wrap=poll -Wl,--wrap=select -Wl,--wrap=recv
+		   -Wl,--wrap=poll -Wl,--wrap=select -Wl,--wrap=recv \
+		   -Wl,--wrap=memcpy -Wl,--wrap=__aeabi_memcpy \
+		   -Wl,--wrap=__aeabi_memcpy4 -Wl,--wrap=__aeabi_memcpy8
 
 LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDS)/libs/libnds \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.8.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
-		   -DTCP_WND_BYTES=$(WND_BYTES)
+DEFINES		:= -DPOC_VERSION=\"0.9.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+		   -DTCP_WND_BYTES=$(WND_BYTES) $(EXTRA_DEFINES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile
 
@@ -49,13 +51,11 @@ include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile
 build/dswifi-rx128/arm7_dswifi.elf:
 	tools/build_dswifi.sh 32 128 build/dswifi-rx128
 
-build/dswifi-rx256/arm7_dswifi.elf:
-	tools/build_dswifi.sh 44 256 build/dswifi-rx256
-
-variants: all build/dswifi-rx128/arm7_dswifi.elf build/dswifi-rx256/arm7_dswifi.elf
+variants: all build/dswifi-rx128/arm7_dswifi.elf
 	$(MAKE) NAME=romm-poc-rx128 DSWIFI_DIR=$(CURDIR)/build/dswifi-rx128 \
 		ARM7ELF=$(CURDIR)/build/dswifi-rx128/arm7_dswifi.elf \
 		WND_LABEL=32x1460-rx128 WND_BYTES=46720
-	$(MAKE) NAME=romm-poc-rx256 DSWIFI_DIR=$(CURDIR)/build/dswifi-rx256 \
-		ARM7ELF=$(CURDIR)/build/dswifi-rx256/arm7_dswifi.elf \
-		WND_LABEL=44x1460-rx256 WND_BYTES=64240
+	$(MAKE) NAME=romm-poc-rx128-dldi9 DSWIFI_DIR=$(CURDIR)/build/dswifi-rx128 \
+		ARM7ELF=$(CURDIR)/build/dswifi-rx128/arm7_dswifi.elf \
+		WND_LABEL=32x1460-rx128-dldi9 WND_BYTES=46720 \
+		EXTRA_DEFINES=-DDLDI_FORCE_ARM9

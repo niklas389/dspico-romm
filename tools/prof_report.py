@@ -18,9 +18,15 @@ OBJDUMP = "/opt/wonderful/toolchain/gcc-arm-none-eabi/bin/arm-none-eabi-objdump"
 
 
 def load_samples(path):
+    # Returns a list of (pc, lr); lr is None for format 1 files.
     data = open(path, "rb").read()
-    (n,) = struct.unpack_from("<I", data, 0)
-    return list(struct.unpack_from("<%dI" % n, data, 4))
+    (magic,) = struct.unpack_from("<I", data, 0)
+    if magic == 0x32465250:  # "PRF2"
+        (n,) = struct.unpack_from("<I", data, 4)
+        v = struct.unpack_from("<%dI" % (2 * n), data, 8)
+        return [(v[2 * i], v[2 * i + 1]) for i in range(n)]
+    n = magic
+    return [(pc, None) for pc in struct.unpack_from("<%dI" % n, data, 4)]
 
 
 def load_symbols(elf):
@@ -97,10 +103,15 @@ def main():
     starts = [s[0] for s in syms]
     ostarts = [o[0] for o in objs]
 
+    def sym_at(addr):
+        i = bisect.bisect_right(starts, addr) - 1
+        return syms[i][2] if i >= 0 else "?"
+
     funcs = collections.Counter()
     libs = collections.Counter()
+    callers = collections.defaultdict(collections.Counter)
     idle = 0
-    for pc in samples:
+    for pc, lr in samples:
         pc &= ~1
         if any(0 <= pc - a <= 8 for a in wfi):
             idle += 1
@@ -112,6 +123,8 @@ def main():
         if i >= 0 and syms[i][1] and pc >= syms[i][0] + syms[i][1]:
             name = "?%08x" % pc
         funcs[name] += 1
+        if lr is not None:
+            callers[name][sym_at((lr & ~1) - 2)] += 1
         j = bisect.bisect_right(ostarts, pc) - 1
         if j >= 0 and pc < objs[j][0] + objs[j][1]:
             lib, _ = short_lib(objs[j][2])
@@ -127,6 +140,16 @@ def main():
     print("\ntop functions:")
     for k, v in funcs.most_common(40):
         print("  %5.1f%%  %s" % (100.0 * v / total, k))
+    if callers:
+        print("\ncallers of the top functions (from lr; exact for leaf functions):")
+        for k, _ in funcs.most_common(8):
+            c = callers.get(k)
+            if not c:
+                continue
+            n = sum(c.values())
+            top = ", ".join("%s %.0f%%" % (ck, 100.0 * cv / n)
+                            for ck, cv in c.most_common(4))
+            print("  %s: %s" % (k, top))
 
 
 if __name__ == "__main__":
