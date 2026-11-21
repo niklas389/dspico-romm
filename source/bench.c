@@ -25,6 +25,7 @@
 #include "net.h"
 #include "prof.h"
 #include "dl.h"
+#include "sdraw.h"
 #include "sdwriter.h"
 
 #define NET_TEST_BYTES (8u * 1024 * 1024)
@@ -224,6 +225,115 @@ static uint32_t bench_sd_one(const char *path, size_t block, bool prealloc)
 }
 
 // Returns the best SD write speed; logs every combination.
+// Direct DSpico sector writes (sdraw.c) vs the DLDI driver, on a test file:
+// write a pattern, read it back through FatFs and compare.
+static void bench_sdraw(const config_t *cfg)
+{
+    log_printf("SD raw (DLDI: %s)\n", sdraw_dldi_name());
+    if (!sdraw_is_dspico())
+    {
+        log_printf("  skipped: not the DSpico driver\n");
+        return;
+    }
+
+    const uint32_t size = 2 * 1024 * 1024, chunk = 64 * 1024;
+    char dir[CFG_PATH_MAX + 16], file[CFG_PATH_MAX + 48];
+    config_path(cfg, "test", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    snprintf(file, sizeof(file), "%s/sdraw.bin", dir);
+
+    uint32_t *buf = aligned_alloc(32, chunk);
+    uint32_t *rd = aligned_alloc(32, chunk);
+    FILE *f = fopen(file, "w+b");
+    if (!buf || !rd || !f)
+    {
+        log_printf("  setup failed\n");
+        goto out;
+    }
+    setvbuf(f, NULL, _IONBF, 0);
+
+    static sdraw_extent_t ext[64];
+    int n = sdraw_map(f, size, ext, 64);
+    if (n <= 0)
+    {
+        log_printf("  map failed (%d)\n", n);
+        goto out;
+    }
+    log_printf("  %d extent(s), first LBA %lu (%lu sectors)\n", n,
+               (unsigned long)ext[0].lba, (unsigned long)ext[0].count);
+
+    for (int mode = 0; mode < 3; mode++)
+    {
+        const char *name = mode == 0 ? "DLDI" : mode == 1 ? "raw CPU" : "raw DMA";
+        uint32_t seed = 0x9E3779B9u * (mode + 1) + net_now_ms();
+
+        // Write
+        uint64_t t0 = prof_ticks();
+        bool ok = true;
+        int e = 0;
+        uint32_t e_off = 0; // sectors used in ext[e]
+        if (mode == 0)
+            fseek(f, 0, SEEK_SET);
+        for (uint32_t off = 0; off < size && ok; off += chunk)
+        {
+            for (uint32_t i = 0; i < chunk / 4; i++)
+                buf[i] = seed ^ ((off / 4 + i) * 2654435761u);
+            if (mode == 0)
+            {
+                ok = fwrite(buf, 1, chunk, f) == chunk;
+                continue;
+            }
+            uint32_t sec = chunk / 512, done = 0;
+            while (done < sec && ok)
+            {
+                uint32_t k = ext[e].count - e_off;
+                if (k > sec - done)
+                    k = sec - done;
+                ok = sdraw_write(ext[e].lba + e_off, buf + done * 128, k, mode == 2);
+                done += k;
+                e_off += k;
+                if (e_off == ext[e].count)
+                {
+                    e++;
+                    e_off = 0;
+                }
+            }
+        }
+        if (mode == 0)
+            fflush(f);
+        uint32_t ms = prof_ticks_to_ms(prof_ticks() - t0);
+
+        // Read back through FatFs and compare
+        uint32_t bad = 0;
+        fseek(f, 0, SEEK_SET);
+        for (uint32_t off = 0; off < size && ok; off += chunk)
+        {
+            if (fread(rd, 1, chunk, f) != chunk)
+            {
+                bad = UINT32_MAX;
+                break;
+            }
+            for (uint32_t i = 0; i < chunk / 4; i++)
+                if (rd[i] != (seed ^ ((off / 4 + i) * 2654435761u)))
+                    bad++;
+        }
+        log_printf("  %-7s %s %4lu KB/s, verify %s\n", name, ok ? "ok" : "FAIL",
+                   (unsigned long)(ms ? (size / 1024) * 1000 / ms : 0),
+                   bad == 0 ? "ok" : "MISMATCH");
+        if (bad)
+            log_file_only("  %s: %lu bad words\n", name, (unsigned long)bad);
+        if (!ok)
+            break;
+    }
+
+out:
+    if (f)
+        fclose(f);
+    remove(file);
+    free(buf);
+    free(rd);
+}
+
 static uint32_t bench_sd(const config_t *cfg)
 {
     char dir[CFG_PATH_MAX + 16], path[CFG_PATH_MAX + 48];
@@ -688,6 +798,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_rtt(cfg, &rtt_min, &rtt_med);
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
+    bench_sdraw(cfg);
 
     g_bench_cfg = cfg;
     net_row_t rows[9];
