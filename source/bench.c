@@ -273,6 +273,17 @@ typedef struct
     bool ok;
 } net_row_t;
 
+static const config_t *g_bench_cfg;
+
+static void save_samples(const config_t *cfg, const char *name)
+{
+    uint32_t n = prof_sampling_stop();
+    char path[CFG_PATH_MAX + 32];
+    config_path(cfg, name, path, sizeof(path));
+    log_printf("  %lu samples -> %s%s\n", (unsigned long)n, name,
+               prof_samples_save(path) ? "" : " (save failed)");
+}
+
 static void prof_fill(net_row_t *row, uint32_t total_ms)
 {
     if (!total_ms)
@@ -304,7 +315,11 @@ static bool run_net(const char *label, const char *base, const char *path,
     net_wifi_stats(&st);
     net_par_result_t r;
     prof_reset();
+    if (conns == 1)
+        prof_sampling_start();
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
+    if (conns == 1)
+        save_samples(g_bench_cfg, "prof-net.bin");
     prof_fill(row, r.total_ms);
     stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
@@ -355,7 +370,12 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
     net_wifi_stats(&st);
     net_result_t r;
     prof_reset();
+    bool sample = buf_size == 32 * 1024;
+    if (sample)
+        prof_sampling_start();
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
+    if (sample)
+        save_samples(cfg, "prof-sd.bin");
     prof_fill(row, r.total_ms);
     fclose(f);
     stats_delta(row, &st);
@@ -463,6 +483,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
 
+    g_bench_cfg = cfg;
     net_row_t rows[7];
     int nrows = 0;
     // Parallel connections were shown to be slower; keep 1 and 2 only.
