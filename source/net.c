@@ -13,6 +13,7 @@
 #include <psa/crypto.h>
 
 #include "log.h"
+#include "prof.h"
 
 // Provided by DSWiFi's lwIP port: 1 ms tick counter driven by a hardware timer.
 extern uint32_t sys_now(void);
@@ -271,7 +272,10 @@ static size_t write_cb(char *data, size_t size, size_t nmemb, void *userp)
     }
     else if (x->fp)
     {
-        if (fwrite(data, 1, len, x->fp) != len)
+        uint64_t t0 = prof_ticks();
+        size_t w = fwrite(data, 1, len, x->fp);
+        prof_add_sd(prof_ticks() - t0);
+        if (w != len)
         {
             x->write_failed = true;
             return 0;

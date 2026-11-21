@@ -31,14 +31,15 @@ INCLUDEDIRS	:= source source/third_party/cjson source/third_party/qrcodegen
 # The ARM7 core must match the DSWiFi build (shared RX buffer layout).
 ARM7ELF		?= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
 
-LIBS		:= -ldswifi9 -lnds9 -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz
+LIBS		:= -ldswifi9 -lnds9 -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz \
+		   -Wl,--wrap=poll -Wl,--wrap=select -Wl,--wrap=recv
 
 LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDS)/libs/libnds \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.5.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+DEFINES		:= -DPOC_VERSION=\"0.6.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
 		   -DTCP_WND_BYTES=$(WND_BYTES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile

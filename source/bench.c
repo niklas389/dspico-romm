@@ -23,69 +23,12 @@
 
 #include "log.h"
 #include "net.h"
+#include "prof.h"
 
 #define NET_TEST_BYTES (8u * 1024 * 1024)
 #define CRYPTO_BYTES   (256u * 1024)
 #define CRYPTO_ROUNDS  8
 #define SD_TEST_BYTES  (4u * 1024 * 1024)
-
-// ---------------------------------------------------------------------------
-// ARM9 idle meter: a cothread that only gets CPU time when every other thread
-// waits (for an interrupt, the network, ...). Its loop count during a test,
-// compared with the count when the system is idle, gives the idle share.
-// ---------------------------------------------------------------------------
-
-static volatile uint32_t g_idle_count;
-static volatile bool g_idle_on;
-static uint32_t g_idle_per_sec; // Calibrated loop count per second when idle
-
-static int idle_thread(void *arg)
-{
-    (void)arg;
-    while (1)
-    {
-        if (g_idle_on)
-            g_idle_count++;
-        cothread_yield();
-    }
-    return 0;
-}
-
-static void idle_start(void)
-{
-    g_idle_count = 0;
-    g_idle_on = true;
-}
-
-// Returns the idle share in percent since idle_start().
-static uint32_t idle_stop(uint32_t elapsed_ms)
-{
-    g_idle_on = false;
-    if (!g_idle_per_sec || !elapsed_ms)
-        return 0;
-    uint64_t expected = (uint64_t)g_idle_per_sec * elapsed_ms / 1000;
-    uint32_t pct = (uint32_t)((uint64_t)g_idle_count * 100 / (expected ? expected : 1));
-    return pct > 100 ? 100 : pct;
-}
-
-static void idle_init(void)
-{
-    static bool started;
-    if (!started)
-    {
-        cothread_create(idle_thread, NULL, 1024, COTHREAD_DETACHED);
-        started = true;
-    }
-    // Calibrate: the main thread only waits for VBlank for one second.
-    idle_start();
-    uint32_t t0 = net_now_ms();
-    for (int i = 0; i < 60; i++)
-        cothread_yield_irq(IRQ_VBLANK);
-    uint32_t dt = net_now_ms() - t0;
-    g_idle_on = false;
-    g_idle_per_sec = dt ? (uint32_t)((uint64_t)g_idle_count * 1000 / dt) : 0;
-    log_file_only("Idle meter: %lu loops/s\n", (unsigned long)g_idle_per_sec);
-}
 
 static uint32_t kbps(uint64_t bytes, uint32_t ms)
 {
@@ -324,9 +267,22 @@ typedef struct
     uint32_t setup_ms;
     uint32_t rx_queued;    // ARM7 -> ARM9 packets during the test
     uint32_t rx_lost;      // ... dropped because the ring buffer was full
-    uint32_t idle_pct;     // ARM9 idle share during the transfer
+    uint32_t wait_pct;     // Main thread blocked waiting for the network
+    uint32_t sd_pct;       // Time in fwrite() (SD card)
     bool ok;
 } net_row_t;
+
+static void prof_fill(net_row_t *row, uint32_t total_ms)
+{
+    if (!total_ms)
+        return;
+    uint32_t wait = prof_ticks_to_ms(prof_wait_ticks());
+    uint32_t sd = prof_ticks_to_ms(prof_sd_ticks());
+    row->wait_pct = wait * 100 / total_ms;
+    row->sd_pct = sd * 100 / total_ms;
+    log_file_only("  wait %lu ms, sd %lu ms, total %lu ms\n", (unsigned long)wait,
+                  (unsigned long)sd, (unsigned long)total_ms);
+}
 
 static void stats_delta(net_row_t *row, const net_wifi_stats_t *a)
 {
@@ -346,9 +302,9 @@ static bool run_net(const char *label, const char *base, const char *path,
     net_wifi_stats_t st;
     net_wifi_stats(&st);
     net_par_result_t r;
-    idle_start();
+    prof_reset();
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
-    row->idle_pct = idle_stop(r.total_ms);
+    prof_fill(row, r.total_ms);
     stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
 
@@ -397,9 +353,9 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
     net_wifi_stats_t st;
     net_wifi_stats(&st);
     net_result_t r;
-    idle_start();
+    prof_reset();
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
-    row->idle_pct = idle_stop(r.total_ms);
+    prof_fill(row, r.total_ms);
     fclose(f);
     stats_delta(row, &st);
     remove(file);
@@ -442,8 +398,6 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
 
-    idle_init();
-
     net_row_t rows[6];
     int nrows = 0;
     // Parallel connections were shown to be slower; keep 1 and 2 only.
@@ -470,15 +424,20 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
     log_printf("SD write     %lu KB/s (best)\n", (unsigned long)sd);
     log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
-    log_printf("test     raw stdy setup lost idle\n");
+    log_printf("test     KB/s lost wait  sd  cpu\n");
     for (int i = 0; i < nrows; i++)
-        log_printf("%-8s%4lu %4lu %4lu %4lu %3lu%%%s\n", rows[i].label,
-                   (unsigned long)rows[i].raw_kbps,
+    {
+        uint32_t busy = rows[i].wait_pct + rows[i].sd_pct;
+        log_printf("%-8s %4lu %4lu %3lu%% %2lu%% %3lu%%%s\n", rows[i].label,
                    (unsigned long)rows[i].steady_kbps,
-                   (unsigned long)rows[i].setup_ms,
                    (unsigned long)rows[i].rx_lost,
-                   (unsigned long)rows[i].idle_pct, rows[i].ok ? "" : " F");
-    log_printf("(KB/s, ms, packets, ARM9 idle)\n");
+                   (unsigned long)rows[i].wait_pct,
+                   (unsigned long)rows[i].sd_pct,
+                   (unsigned long)(busy < 100 ? 100 - busy : 0),
+                   rows[i].ok ? "" : " F");
+    }
+    log_printf("wait: blocked on network\n"
+               "cpu: TLS, curl, copies\n");
     for (int i = 0; i < nrows; i++)
         log_file_only("  %s: rx_queued %lu, rx_lost %lu\n", rows[i].label,
                       (unsigned long)rows[i].rx_queued,

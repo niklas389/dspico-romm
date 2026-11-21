@@ -26,6 +26,7 @@
 #include "config.h"
 #include "log.h"
 #include "net.h"
+#include "prof.h"
 #include "qr.h"
 
 #define ROMS_PER_PAGE 10
@@ -692,6 +693,7 @@ int main(int argc, char **argv)
                   g_cfg.verbose);
 
     step_wifi();
+    prof_init();
 
     if (!net_init(&g_cfg))
         fatal("Network init failed");
