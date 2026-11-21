@@ -190,6 +190,12 @@ static void step_wifi(void)
     extern void dswifi_set_mtu(u16 mtu);
     dswifi_set_mtu(g_cfg.mtu);
     log_printf("MTU: %d\n", g_cfg.mtu);
+
+    // Lets lwIP keep received frames in the shared ring instead of copying
+    // them (patches/dswifi-zero-copy-rx.patch).
+    extern bool dswifi_rx_zero_copy;
+    dswifi_rx_zero_copy = g_cfg.zerocopy;
+    log_printf("Zero-copy RX: %s\n", g_cfg.zerocopy ? "on" : "off");
 #endif
 }
 

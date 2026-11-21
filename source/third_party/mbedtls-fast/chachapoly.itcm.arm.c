@@ -176,26 +176,41 @@ int mbedtls_chachapoly_update(mbedtls_chachapoly_context *ctx,
 
     ctx->ciphertext_len += len;
 
-    if (ctx->mode == MBEDTLS_CHACHAPOLY_ENCRYPT) {
-        ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, len, input, output);
-        if (ret != 0) {
-            return ret;
+    /*
+     * dspico-romm: interleave both passes in 1 KiB pieces. A TLS record is
+     * up to 16 KiB, four times the ARM9 data cache, so the original order
+     * (MAC over the whole record, then decrypt the whole record) reads every
+     * byte from main RAM twice. Here the second pass finds the piece in the
+     * cache. The result is identical: both functions are streaming.
+     */
+    while (len > 0) {
+        size_t n = len < 1024 ? len : 1024;
+
+        if (ctx->mode == MBEDTLS_CHACHAPOLY_ENCRYPT) {
+            ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, n, input, output);
+            if (ret != 0) {
+                return ret;
+            }
+
+            ret = mbedtls_poly1305_update(&ctx->poly1305_ctx, output, n);
+            if (ret != 0) {
+                return ret;
+            }
+        } else { /* DECRYPT */
+            ret = mbedtls_poly1305_update(&ctx->poly1305_ctx, input, n);
+            if (ret != 0) {
+                return ret;
+            }
+
+            ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, n, input, output);
+            if (ret != 0) {
+                return ret;
+            }
         }
 
-        ret = mbedtls_poly1305_update(&ctx->poly1305_ctx, output, len);
-        if (ret != 0) {
-            return ret;
-        }
-    } else { /* DECRYPT */
-        ret = mbedtls_poly1305_update(&ctx->poly1305_ctx, input, len);
-        if (ret != 0) {
-            return ret;
-        }
-
-        ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, len, input, output);
-        if (ret != 0) {
-            return ret;
-        }
+        input += n;
+        output += n;
+        len -= n;
     }
 
     return 0;

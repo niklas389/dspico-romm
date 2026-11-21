@@ -74,6 +74,7 @@ bool config_load(config_t *cfg)
 
     snprintf(cfg->save_slot, sizeof(cfg->save_slot), "autosave");
     cfg->mtu = 1500;
+    cfg->zerocopy = true;
 
     if (!find_base_dir(cfg))
         return false;
@@ -120,6 +121,10 @@ bool config_load(config_t *cfg)
         {
             if (val[0])
                 snprintf(cfg->save_slot, sizeof(cfg->save_slot), "%s", val);
+        }
+        else if (strcasecmp(key, "zerocopy") == 0)
+        {
+            cfg->zerocopy = parse_bool(val);
         }
         else if (strcasecmp(key, "mtu") == 0)
         {

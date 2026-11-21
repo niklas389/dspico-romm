@@ -175,29 +175,36 @@ int memcpy_stats_get(uint32_t *out, int max_entries)
 #define MCS(n) (void)0 // Measured cost when enabled: ~11 % of the ARM9
 #endif
 
+// Caller of the copy in progress, for the sampling profiler: fast_memcpy
+// uses lr as a scratch register, so the interrupted lr is meaningless there.
+volatile uint32_t g_memcpy_caller;
+
+#define WRAP_BODY(n)                                                          \
+    MCS(n);                                                                   \
+    g_memcpy_caller = (uint32_t)(uintptr_t)__builtin_return_address(0);      \
+    fast_memcpy(dst, src, n);                                                 \
+    g_memcpy_caller = 0
+
 // Linker wrappers. __aeabi_memcpy4/8 promise aligned pointers, but going
 // through the same function costs only a few cycles and keeps this simple.
 void *__wrap_memcpy(void *dst, const void *src, size_t n)
 {
-    MCS(n);
-    return fast_memcpy(dst, src, n);
+    WRAP_BODY(n);
+    return dst;
 }
 
 void __wrap___aeabi_memcpy(void *dst, const void *src, size_t n)
 {
-    MCS(n);
-    fast_memcpy(dst, src, n);
+    WRAP_BODY(n);
 }
 
 void __wrap___aeabi_memcpy4(void *dst, const void *src, size_t n)
 {
-    MCS(n);
-    fast_memcpy(dst, src, n);
+    WRAP_BODY(n);
 }
 
 void __wrap___aeabi_memcpy8(void *dst, const void *src, size_t n)
 {
-    MCS(n);
-    fast_memcpy(dst, src, n);
+    WRAP_BODY(n);
 }
 #endif

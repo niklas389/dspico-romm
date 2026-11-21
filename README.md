@@ -69,7 +69,7 @@ There are two builds:
 | ROM | DSWiFi | Log file |
 | --- | --- | --- |
 | `romm-poc.nds` | stock (5840 B TCP window, 12 KiB RX ring, MTU 1300) | `poc-stock-4x1460-rx12.log` |
-| `romm-poc-rx128.nds` | patched: 46720 B window, 128 KiB RX ring, cached RX ring reads, MTU from `config.ini` (default 1500); SD driver on the ARM9 | `poc-32x1460-rx128.log` |
+| `romm-poc-rx128.nds` | patched: 46720 B window, 128 KiB RX ring, zero-copy RX from the ring (`zerocopy=`), MTU from `config.ini` (default 1500); SD driver on the ARM9 | `poc-32x1460-rx128.log` |
 
 Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 
@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.11 | 805 | 602 | MTU 1500 (553 at MTU 1300 in the same run), cached RX ring reads, ChaCha20 without memcpy |
 
 The patched builds also use a matching ARM7 core, because the RX buffer is
 shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).

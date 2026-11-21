@@ -1,0 +1,281 @@
+diff --git a/source/arm7/twl/rx_queue.twl.c b/source/arm7/twl/rx_queue.twl.c
+index 76a8bbe..12b92d7 100644
+--- a/source/arm7/twl/rx_queue.twl.c
++++ b/source/arm7/twl/rx_queue.twl.c
+@@ -15,7 +15,9 @@ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
+     // Before the packet we will store a u32 with the total data size, so we
+     // need to check that everything fits. Also, we need to ensure that a new
+     // size will fit after this packet.
+-    size_t total_size = sizeof(u32) + round_up_32(size) + sizeof(u32);
++    // dspico-romm: entries start and end on 32-byte cache line boundaries
++    // so that the ARM9 can read them in place through its data cache.
++    size_t total_size = round_up_line(sizeof(u32) + size) + sizeof(u32);
+ 
+     // TODO: Replace this by a mutex?
+     int oldIME = enterCriticalSection();
+@@ -42,7 +44,7 @@ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
+ 
+     // Mark the next block as empty, but don't move pointer so that the size of
+     // the next block is written here eventually.
+-    write_idx = round_up_32(write_idx);
++    write_idx = round_up_line(write_idx);
+     write_u32(rxbufData + write_idx, 0);
+ 
+     assert(write_idx <= (WIFI_RXBUFFER_SIZE - sizeof(u32)));
+diff --git a/source/arm9/lwip/include/lwipopts.h b/source/arm9/lwip/include/lwipopts.h
+index 1192570..dc6117b 100644
+--- a/source/arm9/lwip/include/lwipopts.h
++++ b/source/arm9/lwip/include/lwipopts.h
+@@ -20,6 +20,9 @@
+ // libnds implements enough of an OS for lwIP
+ #define NO_SYS                      0
+ 
++// dspico-romm: zero-copy RX (pbufs that point into the ARM7 -> ARM9 ring)
++#define LWIP_SUPPORT_CUSTOM_PBUF    1
++
+ // Use malloc from libc
+ #define MEM_LIBC_MALLOC             1
+ #define MEMP_MEM_MALLOC             1
+diff --git a/source/arm9/lwip/lwip_nds.h b/source/arm9/lwip/lwip_nds.h
+index 66e63f9..f4abed2 100644
+--- a/source/arm9/lwip/lwip_nds.h
++++ b/source/arm9/lwip/lwip_nds.h
+@@ -46,6 +46,14 @@ bool wifi_get_ip6(struct in6_addr *addr);
+ void dswifi_send_data_to_lwip(void *data, u32 len);
+ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload, u32 len);
+ void dswifi_set_mtu(u16 mtu);
++
++// dspico-romm: zero-copy RX (see wifi_arm9.c)
++#define WIFI_RXQ_SLOTS 256
++bool dswifi_send_ref_to_lwip(void *frame, u32 len, int slot);
++void Wifi_RxRelease(int slot);
++extern bool dswifi_rx_zero_copy;  // Set by the application (default on)
++extern int wifi_rx_cur_slot;      // Slot of the packet being delivered
++extern bool wifi_rx_cur_taken;    // Set when lwIP took ownership of it
+ u16 dswifi_get_mtu(void);
+ 
+ void dswifi_lwip_setup_io_posix(void);
+diff --git a/source/arm9/lwip/netif.c b/source/arm9/lwip/netif.c
+index a1bc0ad..bb8e149 100644
+--- a/source/arm9/lwip/netif.c
++++ b/source/arm9/lwip/netif.c
+@@ -110,6 +110,32 @@ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload,
+         pbuf_free(p);
+ }
+ 
++// dspico-romm: zero-copy RX. The pbuf references the frame inside the RX
++// ring; the ring space is given back to the ARM7 when lwIP frees the pbuf.
++static struct pbuf_custom dswifi_rx_ref[WIFI_RXQ_SLOTS];
++
++static void dswifi_rx_ref_free(struct pbuf *p)
++{
++    struct pbuf_custom *pc = (struct pbuf_custom *)p;
++    Wifi_RxRelease(pc - dswifi_rx_ref);
++}
++
++bool dswifi_send_ref_to_lwip(void *frame, u32 len, int slot)
++{
++    struct pbuf_custom *pc = &dswifi_rx_ref[slot];
++    pc->custom_free_function = dswifi_rx_ref_free;
++
++    struct pbuf *p = pbuf_alloced_custom(PBUF_RAW, len, PBUF_REF, pc, frame, len);
++    if (!p)
++        return false;
++
++    // From here on the slot is released by dswifi_rx_ref_free(), also when
++    // the input function fails and we free the pbuf ourselves.
++    if (dswifi_netif.input(p, &dswifi_netif) != ERR_OK)
++        pbuf_free(p);
++    return true;
++}
++
+ // dspico-romm: the MTU decides the TCP MSS lwIP advertises on new connections.
+ void dswifi_set_mtu(u16 mtu)
+ {
+diff --git a/source/arm9/lwip/rx_tx.c b/source/arm9/lwip/rx_tx.c
+index bfac7cc..49624b3 100644
+--- a/source/arm9/lwip/rx_tx.c
++++ b/source/arm9/lwip/rx_tx.c
+@@ -320,17 +320,31 @@ TWL_CODE static void Wifi_TWL_SendPacketToLwip(u8 *packet, size_t size)
+     memcpy(&eth_hdr.src_mac[0], mbox_hdr->src_mac, 6);
+     eth_hdr.ether_type = mbox_hdr->ether_type;
+ 
+-    // dspico-romm: read the payload through the data cache instead of the
+-    // uncached mirror (cache line fills are several times faster than
+-    // uncached word reads), and never write into the shared ring: the
+-    // Ethernet header is copied into the pbuf separately. The ring is only
+-    // ever written by the ARM7 and read here, so its cache lines are always
+-    // clean and invalidating them cannot lose data.
+-    const u8 *payload = (const u8 *)memCached(packet + sizeof(mbox_hdr_rx_data_packet));
+-    size_t payload_size = size - sizeof(mbox_hdr_rx_data_packet);
+-    DC_InvalidateRange(payload, payload_size);
+-
+-    dswifi_send_eth_to_lwip(&eth_hdr, sizeof(EthernetFrameHeader), payload, payload_size);
++    // dspico-romm: zero-copy RX. Write the Ethernet header through the
++    // uncached pointer (as upstream does), so no dirty cache line covers the
++    // ring, then invalidate the frame and hand lwIP a pbuf that references
++    // it through the cached mirror. The ring entry stays reserved until lwIP
++    // frees the pbuf (Wifi_RxRelease).
++    u8 *frame = packet + sizeof(mbox_hdr_rx_data_packet) - sizeof(EthernetFrameHeader);
++    memcpy(frame, &eth_hdr, sizeof(EthernetFrameHeader));
++
++    size_t frame_size = size - sizeof(mbox_hdr_rx_data_packet)
++                      + sizeof(EthernetFrameHeader);
++
++    u8 *frame_cached = (u8 *)memCached(frame);
++    DC_InvalidateRange(frame_cached, frame_size);
++
++    if (wifi_rx_cur_slot >= 0 && dswifi_rx_zero_copy &&
++        dswifi_send_ref_to_lwip(frame_cached, frame_size, wifi_rx_cur_slot))
++    {
++        wifi_rx_cur_taken = true;
++        return;
++    }
++
++    // No slot or no pbuf: copy (the header is already in place)
++    dswifi_send_eth_to_lwip(frame_cached, sizeof(EthernetFrameHeader),
++                            frame_cached + sizeof(EthernetFrameHeader),
++                            frame_size - sizeof(EthernetFrameHeader));
+ }
+ 
+ void Wifi_SendPacketToLwip(u8 *packet, size_t size)
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index ff705d9..2560b6a 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -87,17 +87,60 @@ static void Wifi_NTR_Update(void)
+     }
+ }
+ 
++// dspico-romm: zero-copy RX bookkeeping.
++//
++// lwIP keeps pbufs that point into the RX ring until the data has been read,
++// so the ring position the ARM7 may reuse (WifiData->rxbufRead) is advanced
++// only over packets that have been released, in ring order. Packets that are
++// not handed to lwIP are released immediately. Everything runs in cothreads,
++// so no locking is needed.
++bool dswifi_rx_zero_copy = true;
++int wifi_rx_cur_slot = -1;
++bool wifi_rx_cur_taken;
++
++typedef struct {
++    u32 start;    // Ring index of the entry (size word)
++    u32 end;      // End of the entry (32-byte aligned)
++    u32 next;     // rxbufRead value once this entry is released
++    bool done;
++} rxq_entry;
++
++static rxq_entry rxq[WIFI_RXQ_SLOTS];
++static unsigned int rxq_head, rxq_count;
++static u32 rx_parse_idx;
++
++void Wifi_RxRelease(int slot)
++{
++    rxq[slot].done = true;
++
++    u8 *ring = (u8 *)memCached((void *)WifiData->rxbufData);
++
++    while (rxq_count > 0 && rxq[rxq_head].done)
++    {
++        rxq_entry *e = &rxq[rxq_head];
++        // Discard anything lwIP may have written into the cached frame, so
++        // that no dirty line is written back after the ARM7 reuses it.
++        DC_InvalidateRange(ring + e->start, e->end - e->start);
++        WifiData->rxbufRead = e->next;
++        rxq_head = (rxq_head + 1) % WIFI_RXQ_SLOTS;
++        rxq_count--;
++    }
++}
++
+ TWL_CODE static void Wifi_TWL_Update(void)
+ {
+     const u8 *rxbufData = (const u8*)WifiData->rxbufData;
+ 
+-    u32 read_idx = WifiData->rxbufRead;
++    if (rxq_count == 0)
++        rx_parse_idx = WifiData->rxbufRead;
++
++    u32 read_idx = rx_parse_idx;
+ 
+     assert((read_idx & 3) == 0);
+ 
+     // Check for received packets, forward to whatever wants them.
+     int cnt = 0;
+-    while (1)
++    while (rxq_count < WIFI_RXQ_SLOTS)
+     {
+         // Read packet size
+         size_t size = read_u32(rxbufData + read_idx);
+@@ -111,10 +154,25 @@ TWL_CODE static void Wifi_TWL_Update(void)
+             read_idx = 0;
+             size = read_u32(rxbufData + read_idx);
+             if (size == 0)
++            {
++                rx_parse_idx = read_idx;
+                 break;
++            }
+         }
++
++        u32 entry_idx = read_idx;
+         read_idx += sizeof(uint32_t);
+ 
++        int slot = (rxq_head + rxq_count) % WIFI_RXQ_SLOTS;
++        rxq[slot].start = entry_idx;
++        rxq[slot].end = round_up_line(read_idx + size);
++        rxq[slot].next = rxq[slot].end; // The ARM7 pads entries to a line
++        rxq[slot].done = false;
++        rxq_count++;
++
++        wifi_rx_cur_slot = slot;
++        wifi_rx_cur_taken = false;
++
+ #ifdef DSWIFI_ENABLE_LWIP
+         if (wifi_lwip_enabled)
+         {
+@@ -126,11 +184,16 @@ TWL_CODE static void Wifi_TWL_Update(void)
+             }
+         }
+ #endif
+-        read_idx += round_up_32(size);
++        wifi_rx_cur_slot = -1;
++
++        read_idx = rxq[slot].next;
+ 
+         assert(read_idx <= (WIFI_RXBUFFER_SIZE - sizeof(u32)));
+ 
+-        WifiData->rxbufRead = read_idx;
++        rx_parse_idx = read_idx;
++
++        if (!wifi_rx_cur_taken)
++            Wifi_RxRelease(slot);
+ 
+         WifiData->stats[WSTAT_TXPACKETS]++;
+         WifiData->stats[WSTAT_TXBYTES] += size;
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index 9864916..f9d1b76 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -234,7 +234,9 @@ typedef struct WIFI_MAINSTRUCT
+     // to the ARM9.
+     u32 rxbufWrite; // We will write starting from this entry in rxbufData[]
+     u32 rxbufRead;  // And we will read starting from this entry in rxbufData[]
+-    ALIGN(4) u8 rxbufData[WIFI_RXBUFFER_SIZE];
++    // dspico-romm: 32-byte aligned so that every ring entry (32-byte
++    // aligned and padded) owns its cache lines (zero-copy RX on the ARM9).
++    ALIGN(32) u8 rxbufData[WIFI_RXBUFFER_SIZE];
+ 
+     // TX buffer. It is used to send packets from the ARM9 to the ARM7 to be
+     // transferred to other devices.
+@@ -279,6 +281,12 @@ typedef struct WIFI_MAINSTRUCT
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+ 
++// dspico-romm: DSi RX ring entries are padded to whole cache lines.
++static inline u32 round_up_line(u32 value)
++{
++    return (value + 31) & ~31;
++}
++
+ static inline u32 round_up_32(u32 value)
+ {
+     return (value + 3) & ~3;

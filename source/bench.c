@@ -386,8 +386,12 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
         log_printf("  can't create %s\n", file);
         return true;
     }
-    // Same strategy as the real app will use: reserve the file, big buffer.
-    setvbuf(f, NULL, _IOFBF, buf_size);
+    // Reserve the file. buf_size 0: unbuffered, curl's chunks go straight to
+    // FatFs (no copy); otherwise through a stdio buffer of that size.
+    if (buf_size)
+        setvbuf(f, NULL, _IOFBF, buf_size);
+    else
+        setvbuf(f, NULL, _IONBF, 0);
     if (!sd_preallocate(f, len))
         log_printf("  preallocation failed\n");
 
@@ -546,6 +550,8 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
 #endif
 
+    if (go)
+        go = run_net_sd(cfg, path, len, 0, "SD unbuf", &rows[nrows++]);
     if (go)
         go = run_net_sd(cfg, path, len, 256 * 1024, "SD 256K", &rows[nrows++]);
     if (go)

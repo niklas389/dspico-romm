@@ -35,6 +35,8 @@ static volatile uint32_t g_nsamples;
 static uint32_t g_max_samples;
 static volatile bool g_sampling;
 
+extern volatile uint32_t g_memcpy_caller; // fastcopy.itcm.arm.c
+
 void prof_irq_entry(void); // prof_irq.s, calls prof_irq_c(lr_of_interrupted)
 void prof_irq_c(uint32_t caller_lr);
 
@@ -46,8 +48,9 @@ void prof_irq_c(uint32_t caller_lr)
     {
         uintptr_t lr_slot = (uintptr_t)__sp_irq - 4; // Saved lr_irq
         uint32_t pc = *(const volatile uint32_t *)lr_slot - 4;
+        uint32_t mc = g_memcpy_caller;
         g_samples[g_nsamples++] = pc;
-        g_samples[g_nsamples++] = caller_lr;
+        g_samples[g_nsamples++] = mc ? mc : caller_lr;
     }
 }
 
