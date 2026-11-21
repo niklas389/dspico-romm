@@ -1,5 +1,5 @@
 diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
-index 0f231ba..bc92934 100644
+index 0f231ba..18be2d3 100644
 --- a/source/arm7/twl/card.twl.c
 +++ b/source/arm7/twl/card.twl.c
 @@ -37,6 +37,11 @@ enum { A7P_CMD52_N, A7P_CMD52_L, A7P_BLK_N, A7P_BLK_L, A7P_QUEUE_L, A7P_IRQ_N,
@@ -52,7 +52,7 @@ index 0f231ba..bc92934 100644
 +// 1: read status/lookahead registers with 4-byte CMD53 in the IRQ path;
 +// 0: keep upstream's CMD52 reads (only the polling and TX read are removed).
 +#ifndef DSPICO_A7_CMD53
-+#define DSPICO_A7_CMD53 1
++#define DSPICO_A7_CMD53 0 // 1 hangs association (v0.22 test)
 +#endif
 +
  static u16 wifi_card_mbox0_readbytes(u8 *read_buffer, u32 sz_buf, u32 len_read)
@@ -157,17 +157,46 @@ index 0f231ba..bc92934 100644
 +    return wifi_card_initted();
 +}
 diff --git a/source/arm7/twl/rx_queue.twl.c b/source/arm7/twl/rx_queue.twl.c
-index 12b92d7..e449109 100644
+index 12b92d7..538b51a 100644
 --- a/source/arm7/twl/rx_queue.twl.c
 +++ b/source/arm7/twl/rx_queue.twl.c
-@@ -10,6 +10,32 @@
+@@ -10,6 +10,73 @@
  #include "arm7/twl/card.h"
  #include "common/common_twl_defs.h"
  
-+// dspico-romm: the packet data in the mailbox buffer starts at an address
-+// = 2 mod 4 and ring entries are word aligned, so memcpy() falls back to
-+// byte stores, which are slow on the ARM7's 16-bit main RAM bus (~7 cycles
-+// per byte measured). Merge halfwords into words instead.
++// dspico-romm: ARM-mode burst copy of 4-word groups: ldmia from the mailbox
++// buffer (source + 2, word aligned), merge halfwords, stmia to the ring. One
++// stmia pays the main RAM access setup once per 4 words instead of per word
++// (single word stores measured ~30 ARM7 cycles each).
++// r0 = dst (word aligned), r1 = src words, r2 = carry (low halfword),
++// r3 = number of 4-word groups (> 0).
++__attribute__((naked, target("arm"), noinline))
++static void copy_s2_groups(__attribute__((unused)) u32 *d,
++                           __attribute__((unused)) const u32 *s,
++                           __attribute__((unused)) u32 carry,
++                           __attribute__((unused)) size_t groups)
++{
++    __asm__ volatile(
++        "push   {r4-r11}\n"
++        "1:\n"
++        "ldmia  r1!, {r4-r7}\n"
++        "orr    r8, r2, r4, lsl #16\n"
++        "mov    r9, r4, lsr #16\n"
++        "orr    r9, r9, r5, lsl #16\n"
++        "mov    r10, r5, lsr #16\n"
++        "orr    r10, r10, r6, lsl #16\n"
++        "mov    r11, r6, lsr #16\n"
++        "orr    r11, r11, r7, lsl #16\n"
++        "mov    r2, r7, lsr #16\n"
++        "stmia  r0!, {r8-r11}\n"
++        "subs   r3, r3, #1\n"
++        "bne    1b\n"
++        "pop    {r4-r11}\n"
++        "bx     lr\n");
++}
++
++// The packet data in the mailbox buffer starts at an address = 2 mod 4 and
++// ring entries are word aligned, so memcpy() falls back to byte stores.
 +static void copy_to_ring(u8 *dst, const u8 *src, size_t n)
 +{
 +    if ((((uintptr_t)dst & 3) != 0) || (((uintptr_t)src & 3) != 2) || n < 8)
@@ -180,6 +209,18 @@ index 12b92d7..e449109 100644
 +    u32 *d = (u32 *)dst;
 +    const u32 *s = (const u32 *)(src + 2);
 +    u32 carry = *(const u16 *)src;
++    size_t groups = words / 4;
++    if (groups)
++    {
++        copy_s2_groups(d, s, carry, groups);
++        d += groups * 4;
++        s += groups * 4;
++        carry = s[-1] >> 16;
++        words -= groups * 4;
++        dst += groups * 16;
++        src += groups * 16;
++        n -= groups * 16;
++    }
 +    for (size_t i = 0; i < words; i++)
 +    {
 +        u32 w = s[i];
@@ -193,7 +234,7 @@ index 12b92d7..e449109 100644
  int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
  {
      // Before the packet we will store a u32 with the total data size, so we
-@@ -39,7 +65,7 @@ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
+@@ -39,7 +106,7 @@ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
      write_idx += sizeof(u32);
  
      // Write data

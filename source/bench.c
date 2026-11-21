@@ -701,6 +701,16 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
+    // A/B: main RAM bus priority to the ARM7 (EXMEMCNT bit 15), which copies
+    // every received packet into main RAM while the ARM9 decrypts/writes SD.
+    if (go)
+    {
+        REG_EXMEMCNT |= BIT(15);
+        go = run_dl_net("dl net7", path, len, false, &rows[nrows++]);
+        if (go)
+            go = run_net_sd_async(cfg, path, len, "dl SD7", false, true, &rows[nrows++]);
+        REG_EXMEMCNT &= ~BIT(15);
+    }
 
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);

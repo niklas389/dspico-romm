@@ -42,7 +42,7 @@ LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.22.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+DEFINES		:= -DPOC_VERSION=\"0.23.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
 		   -DTCP_WND_BYTES=$(WND_BYTES) $(EXTRA_DEFINES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile
@@ -54,15 +54,8 @@ build/dswifi-rx128/arm7_dswifi.elf:
 
 # The SD driver runs on the ARM9 (measured: SD writes 4.4 vs 1.5 MB/s, and the
 # ARM7 stays free for Wi-Fi).
-build/dswifi-safe/arm7_dswifi.elf:
-	A7_CMD53=0 tools/build_dswifi.sh 32 128 build/dswifi-safe
-
-variants: all build/dswifi-rx128/arm7_dswifi.elf build/dswifi-safe/arm7_dswifi.elf
+variants: all build/dswifi-rx128/arm7_dswifi.elf
 	$(MAKE) NAME=romm-poc-rx128 DSWIFI_DIR=$(CURDIR)/build/dswifi-rx128 \
 		ARM7ELF=$(CURDIR)/build/dswifi-rx128/arm7_dswifi.elf \
 		WND_LABEL=32x1460-rx128 WND_BYTES=46720 \
-		EXTRA_DEFINES="-DDLDI_FORCE_ARM9 -DDSPICO_DSWIFI"
-	$(MAKE) NAME=romm-poc-safe DSWIFI_DIR=$(CURDIR)/build/dswifi-safe \
-		ARM7ELF=$(CURDIR)/build/dswifi-safe/arm7_dswifi.elf \
-		WND_LABEL=32x1460-safe WND_BYTES=46720 \
 		EXTRA_DEFINES="-DDLDI_FORCE_ARM9 -DDSPICO_DSWIFI"
