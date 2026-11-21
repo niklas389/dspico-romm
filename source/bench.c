@@ -178,30 +178,35 @@ static void bench_crypto(uint32_t *chacha_kbps, uint32_t *gcm_kbps)
 // SD write
 // ---------------------------------------------------------------------------
 
-static uint32_t bench_sd(const config_t *cfg)
+// Reserves len bytes for f by seeking past the end and writing one byte.
+// FatFs then allocates the whole cluster chain at once instead of extending
+// the file (and updating the FAT) on every write. Returns to offset 0.
+static bool sd_preallocate(FILE *f, uint64_t len)
 {
-    char dir[CFG_PATH_MAX + 16], path[CFG_PATH_MAX + 48];
-    config_path(cfg, "test", dir, sizeof(dir));
-    mkdir(dir, 0777);
-    snprintf(path, sizeof(path), "%s/sdbench.bin", dir);
+    if (fseek(f, (long)len - 1, SEEK_SET) != 0 || fputc(0, f) == EOF ||
+        fflush(f) != 0 || fseek(f, 0, SEEK_SET) != 0)
+        return false;
+    return true;
+}
 
-    const size_t block = 64 * 1024;
+static uint32_t bench_sd_one(const char *path, size_t block, bool prealloc)
+{
     unsigned char *buf = malloc(block);
     FILE *f = fopen(path, "wb");
     if (!buf || !f)
     {
-        log_printf("SD bench: can't open file\n");
         free(buf);
         if (f)
             fclose(f);
         return 0;
     }
     memset(buf, 0x5A, block);
-    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+    setvbuf(f, NULL, _IONBF, 0); // Our blocks go straight to FatFs
 
     uint32_t t0 = net_now_ms();
+    bool ok = !prealloc || sd_preallocate(f, SD_TEST_BYTES);
     size_t written = 0;
-    while (written < SD_TEST_BYTES)
+    while (ok && written < SD_TEST_BYTES)
     {
         if (fwrite(buf, 1, block, f) != block)
             break;
@@ -212,10 +217,32 @@ static uint32_t bench_sd(const config_t *cfg)
 
     free(buf);
     remove(path);
+    return kbps(written, dt);
+}
 
-    uint32_t r = kbps(written, dt);
-    log_printf("SD write (64K blocks): %lu KB/s\n", (unsigned long)r);
-    return r;
+// Returns the best SD write speed; logs every combination.
+static uint32_t bench_sd(const config_t *cfg)
+{
+    char dir[CFG_PATH_MAX + 16], path[CFG_PATH_MAX + 48];
+    config_path(cfg, "test", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    snprintf(path, sizeof(path), "%s/sdbench.bin", dir);
+
+    const size_t blocks[3] = { 64 * 1024, 256 * 1024, 1024 * 1024 };
+    uint32_t best = 0;
+    log_printf("SD write KB/s  plain  prealloc\n");
+    for (int i = 0; i < 3; i++)
+    {
+        uint32_t plain = bench_sd_one(path, blocks[i], false);
+        uint32_t pre = bench_sd_one(path, blocks[i], true);
+        log_printf("  %4uK block   %5lu  %5lu\n", (unsigned)(blocks[i] / 1024),
+                   (unsigned long)plain, (unsigned long)pre);
+        if (plain > best)
+            best = plain;
+        if (pre > best)
+            best = pre;
+    }
+    return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +329,10 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
         log_printf("  can't create %s\n", file);
         return true;
     }
-    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+    // Same strategy as the real app will use: reserve the file, big buffer.
+    setvbuf(f, NULL, _IOFBF, 256 * 1024);
+    if (!sd_preallocate(f, len))
+        log_printf("  preallocation failed\n");
 
     net_wifi_stats_t st;
     net_wifi_stats(&st);
@@ -371,7 +401,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
                (unsigned long)rtt_med);
     log_printf("CPU chacha   %lu KB/s\n", (unsigned long)chacha);
     log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
-    log_printf("SD write     %lu KB/s\n", (unsigned long)sd);
+    log_printf("SD write     %lu KB/s (best)\n", (unsigned long)sd);
     log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
     log_printf("test      raw stdy setup lost\n");
     for (int i = 0; i < nrows; i++)

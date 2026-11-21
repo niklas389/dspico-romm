@@ -687,6 +687,7 @@ int main(int argc, char **argv)
         fatal("romm/config.ini not found or\nmissing url= (see README)");
 
     log_printf("Config: %sconfig.ini\n", g_cfg.base_dir);
+    log_printf("Save slot: %s\n", g_cfg.save_slot);
     log_file_only("URL: %s insecure=%d verbose=%d\n", g_cfg.url, g_cfg.insecure,
                   g_cfg.verbose);
 

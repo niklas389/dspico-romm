@@ -2,6 +2,9 @@
 ; Base URL of your RomM server, no trailing slash.
 url=https://romm.example.com
 
+; RomM save slot used for save sync (Grout currently uses "autosave").
+save_slot=autosave
+
 ; 1 = skip certificate verification. Diagnostics only.
 insecure=0
 

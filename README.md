@@ -69,8 +69,16 @@ There are three builds, differing only in DSWiFi settings:
 | ROM | TCP window | ARM7 -> ARM9 RX buffer | Log file |
 | --- | --- | --- | --- |
 | `romm-poc.nds` | 5840 B (stock) | 12 KiB (stock) | `poc-stock-4x1460-rx12.log` |
-| `romm-poc-wnd32.nds` | 46720 B | 12 KiB | `poc-32x1460-rx12.log` |
 | `romm-poc-rx128.nds` | 46720 B | 128 KiB | `poc-32x1460-rx128.log` |
+| `romm-poc-rx256.nds` | 64240 B (max without window scaling) | 256 KiB | `poc-44x1460-rx256.log` |
+
+Measured on a DSi XL (v0.3.0, 8 MB ranged download, Mario Kart DS):
+
+| Build | 1 conn | 2 conns | 4 conns | to SD | lost (1 conn) |
+| --- | --- | --- | --- | --- | --- |
+| stock | 347 KB/s | 426 | 421 | 250 | 0 |
+| 46720 B window, 12 KiB RX | 411 | 459 | 232 | 322 | 161 |
+| 46720 B window, 128 KiB RX | 626 | 563 | 364 | 394 | 0 |
 
 The patched builds also use a matching ARM7 core, because the RX buffer is
 shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
