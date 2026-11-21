@@ -37,10 +37,10 @@ index 1192570..dc6117b 100644
  #define MEM_LIBC_MALLOC             1
  #define MEMP_MEM_MALLOC             1
 diff --git a/source/arm9/lwip/lwip_nds.h b/source/arm9/lwip/lwip_nds.h
-index 66e63f9..f4abed2 100644
+index 66e63f9..823583e 100644
 --- a/source/arm9/lwip/lwip_nds.h
 +++ b/source/arm9/lwip/lwip_nds.h
-@@ -46,6 +46,14 @@ bool wifi_get_ip6(struct in6_addr *addr);
+@@ -46,6 +46,17 @@ bool wifi_get_ip6(struct in6_addr *addr);
  void dswifi_send_data_to_lwip(void *data, u32 len);
  void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload, u32 len);
  void dswifi_set_mtu(u16 mtu);
@@ -49,6 +49,9 @@ index 66e63f9..f4abed2 100644
 +#define WIFI_RXQ_SLOTS 256
 +bool dswifi_send_ref_to_lwip(void *frame, u32 len, int slot);
 +void Wifi_RxRelease(int slot);
++int dswifi_rx_ref_count(int slot);
++// Writes a one-line-per-item summary of the zero-copy RX state (debugging).
++int dswifi_rx_debug(char *buf, int len);
 +extern bool dswifi_rx_zero_copy;  // Set by the application (default on)
 +extern int wifi_rx_cur_slot;      // Slot of the packet being delivered
 +extern bool wifi_rx_cur_taken;    // Set when lwIP took ownership of it
@@ -56,10 +59,10 @@ index 66e63f9..f4abed2 100644
  
  void dswifi_lwip_setup_io_posix(void);
 diff --git a/source/arm9/lwip/netif.c b/source/arm9/lwip/netif.c
-index a1bc0ad..bb8e149 100644
+index a1bc0ad..a224587 100644
 --- a/source/arm9/lwip/netif.c
 +++ b/source/arm9/lwip/netif.c
-@@ -110,6 +110,32 @@ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload,
+@@ -110,6 +110,37 @@ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload,
          pbuf_free(p);
  }
  
@@ -71,6 +74,11 @@ index a1bc0ad..bb8e149 100644
 +{
 +    struct pbuf_custom *pc = (struct pbuf_custom *)p;
 +    Wifi_RxRelease(pc - dswifi_rx_ref);
++}
++
++int dswifi_rx_ref_count(int slot)
++{
++    return dswifi_rx_ref[slot].pbuf.ref;
 +}
 +
 +bool dswifi_send_ref_to_lwip(void *frame, u32 len, int slot)
@@ -93,10 +101,10 @@ index a1bc0ad..bb8e149 100644
  void dswifi_set_mtu(u16 mtu)
  {
 diff --git a/source/arm9/lwip/rx_tx.c b/source/arm9/lwip/rx_tx.c
-index bfac7cc..49624b3 100644
+index bfac7cc..3cca5c9 100644
 --- a/source/arm9/lwip/rx_tx.c
 +++ b/source/arm9/lwip/rx_tx.c
-@@ -320,17 +320,31 @@ TWL_CODE static void Wifi_TWL_SendPacketToLwip(u8 *packet, size_t size)
+@@ -320,17 +320,32 @@ TWL_CODE static void Wifi_TWL_SendPacketToLwip(u8 *packet, size_t size)
      memcpy(&eth_hdr.src_mac[0], mbox_hdr->src_mac, 6);
      eth_hdr.ether_type = mbox_hdr->ether_type;
  
@@ -111,19 +119,20 @@ index bfac7cc..49624b3 100644
 -    DC_InvalidateRange(payload, payload_size);
 -
 -    dswifi_send_eth_to_lwip(&eth_hdr, sizeof(EthernetFrameHeader), payload, payload_size);
-+    // dspico-romm: zero-copy RX. Write the Ethernet header through the
-+    // uncached pointer (as upstream does), so no dirty cache line covers the
-+    // ring, then invalidate the frame and hand lwIP a pbuf that references
-+    // it through the cached mirror. The ring entry stays reserved until lwIP
-+    // frees the pbuf (Wifi_RxRelease).
++    // dspico-romm: zero-copy RX. Invalidate the frame, then write the
++    // Ethernet header through the cache (a write through the uncached mirror
++    // could still sit in the write buffer when the line is refilled). The
++    // entry owns its cache lines and Wifi_RxRelease() discards them before
++    // the ARM7 may reuse the space, so the dirty line is never written back
++    // over new data. lwIP gets a pbuf that references the frame in place.
 +    u8 *frame = packet + sizeof(mbox_hdr_rx_data_packet) - sizeof(EthernetFrameHeader);
-+    memcpy(frame, &eth_hdr, sizeof(EthernetFrameHeader));
 +
 +    size_t frame_size = size - sizeof(mbox_hdr_rx_data_packet)
 +                      + sizeof(EthernetFrameHeader);
 +
 +    u8 *frame_cached = (u8 *)memCached(frame);
 +    DC_InvalidateRange(frame_cached, frame_size);
++    memcpy(frame_cached, &eth_hdr, sizeof(EthernetFrameHeader));
 +
 +    if (wifi_rx_cur_slot >= 0 && dswifi_rx_zero_copy &&
 +        dswifi_send_ref_to_lwip(frame_cached, frame_size, wifi_rx_cur_slot))
@@ -140,10 +149,19 @@ index bfac7cc..49624b3 100644
  
  void Wifi_SendPacketToLwip(u8 *packet, size_t size)
 diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
-index ff705d9..2560b6a 100644
+index ff705d9..5dca25b 100644
 --- a/source/arm9/wifi_arm9.c
 +++ b/source/arm9/wifi_arm9.c
-@@ -87,17 +87,60 @@ static void Wifi_NTR_Update(void)
+@@ -3,6 +3,8 @@
+ // Copyright (C) 2005-2006 Stephen Stair - sgstair@akkit.org - http://www.akkit.org
+ // Copyright (C) 2025 Antonio Niño Díaz
+ 
++#include <stdio.h>
++
+ #include <dswifi9.h>
+ 
+ #include "arm9/wifi_arm9.h"
+@@ -87,11 +89,126 @@ static void Wifi_NTR_Update(void)
      }
  }
  
@@ -162,12 +180,84 @@ index ff705d9..2560b6a 100644
 +    u32 start;    // Ring index of the entry (size word)
 +    u32 end;      // End of the entry (32-byte aligned)
 +    u32 next;     // rxbufRead value once this entry is released
++    u32 t_ms;     // When it was parsed (diagnostics)
 +    bool done;
++    bool taken;   // Handed to lwIP as a reference pbuf
 +} rxq_entry;
 +
 +static rxq_entry rxq[WIFI_RXQ_SLOTS];
 +static unsigned int rxq_head, rxq_count;
 +static u32 rx_parse_idx;
++
++// Diagnostics
++static u32 rxd_zc, rxd_copy, rxd_max_count, rxd_max_bytes, rxd_qfull;
++
++#include "lwip/sys.h"
++
++static u32 rxq_used_bytes(void)
++{
++    u32 r = WifiData->rxbufRead, p = rx_parse_idx;
++    return p >= r ? p - r : WIFI_RXBUFFER_SIZE - r + p;
++}
++
++static u32 be16(const u8 *p) { return (p[0] << 8) | p[1]; }
++static u32 be32(const u8 *p) { return (be16(p) << 16) | be16(p + 2); }
++
++int dswifi_rx_debug(char *buf, int len)
++{
++    u8 *ring = (u8 *)memCached((void *)WifiData->rxbufData);
++    int n = snprintf(buf, len,
++                     "rxq count %u used %lu B (max %lu / %lu B) qfull %lu\n"
++                     "rxq zc %lu copy %lu rd %lu parse %lu wr %lu\n",
++                     rxq_count, (unsigned long)(rxq_count ? rxq_used_bytes() : 0),
++                     (unsigned long)rxd_max_count, (unsigned long)rxd_max_bytes,
++                     (unsigned long)rxd_qfull, (unsigned long)rxd_zc,
++                     (unsigned long)rxd_copy, (unsigned long)WifiData->rxbufRead,
++                     (unsigned long)rx_parse_idx, (unsigned long)WifiData->rxbufWrite);
++
++    // The oldest entries still held, with what they contain
++    unsigned int shown = 0, done_behind = 0;
++    for (unsigned int i = 0; i < rxq_count && n < len; i++)
++    {
++        rxq_entry *e = &rxq[(rxq_head + i) % WIFI_RXQ_SLOTS];
++        if (e->done)
++        {
++            done_behind++;
++            continue;
++        }
++        if (shown++ >= 4)
++            continue;
++        const u8 *f = ring + e->start + 4 + 24 - 14; // Ethernet frame
++        u32 etype = be16(f + 12);
++        const u8 *ip = f + 14;
++        n += snprintf(buf + n, len - n, " held #%u age %lu ms ref %d type %04lx",
++                      i, (unsigned long)(sys_now() - e->t_ms),
++                      e->taken ? dswifi_rx_ref_count((rxq_head + i) % WIFI_RXQ_SLOTS) : -1,
++                      (unsigned long)etype);
++        if (etype == 0x0800 && n < len)
++        {
++            u32 ihl = (ip[0] & 15) * 4, proto = ip[9], tot = be16(ip + 2);
++            n += snprintf(buf + n, len - n, " ip p%lu len %lu frag %04lx",
++                          (unsigned long)proto, (unsigned long)tot,
++                          (unsigned long)be16(ip + 6));
++            if (proto == 6 && n < len)
++            {
++                const u8 *t = ip + ihl;
++                u32 thl = (t[12] >> 4) * 4;
++                n += snprintf(buf + n, len - n, " tcp %lu>%lu seq %lu fl %02x data %ld",
++                              (unsigned long)be16(t), (unsigned long)be16(t + 2),
++                              (unsigned long)be32(t + 4), t[13],
++                              (long)tot - (long)ihl - (long)thl);
++            }
++        }
++        if (n < len)
++            n += snprintf(buf + n, len - n, "\n");
++    }
++    if (n < len)
++        n += snprintf(buf + n, len - n, "rxq held %u, released behind head %u\n",
++                      shown, done_behind);
++    return n;
++}
 +
 +void Wifi_RxRelease(int slot)
 +{
@@ -199,14 +289,20 @@ index ff705d9..2560b6a 100644
  
      assert((read_idx & 3) == 0);
  
-     // Check for received packets, forward to whatever wants them.
+@@ -99,6 +216,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
      int cnt = 0;
--    while (1)
-+    while (rxq_count < WIFI_RXQ_SLOTS)
+     while (1)
      {
++        if (rxq_count >= WIFI_RXQ_SLOTS)
++        {
++            rxd_qfull++;
++            break;
++        }
++
          // Read packet size
          size_t size = read_u32(rxbufData + read_idx);
-@@ -111,10 +154,25 @@ TWL_CODE static void Wifi_TWL_Update(void)
+         if (size == 0)
+@@ -111,10 +234,29 @@ TWL_CODE static void Wifi_TWL_Update(void)
              read_idx = 0;
              size = read_u32(rxbufData + read_idx);
              if (size == 0)
@@ -224,7 +320,11 @@ index ff705d9..2560b6a 100644
 +        rxq[slot].end = round_up_line(read_idx + size);
 +        rxq[slot].next = rxq[slot].end; // The ARM7 pads entries to a line
 +        rxq[slot].done = false;
++        rxq[slot].taken = false;
++        rxq[slot].t_ms = sys_now();
 +        rxq_count++;
++        if (rxq_count > rxd_max_count)
++            rxd_max_count = rxq_count;
 +
 +        wifi_rx_cur_slot = slot;
 +        wifi_rx_cur_taken = false;
@@ -232,7 +332,7 @@ index ff705d9..2560b6a 100644
  #ifdef DSWIFI_ENABLE_LWIP
          if (wifi_lwip_enabled)
          {
-@@ -126,11 +184,16 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -126,11 +268,27 @@ TWL_CODE static void Wifi_TWL_Update(void)
              }
          }
  #endif
@@ -246,8 +346,19 @@ index ff705d9..2560b6a 100644
 -        WifiData->rxbufRead = read_idx;
 +        rx_parse_idx = read_idx;
 +
-+        if (!wifi_rx_cur_taken)
++        if (wifi_rx_cur_taken)
++        {
++            rxd_zc++;
++            rxq[slot].taken = true;
++            u32 used = rxq_used_bytes();
++            if (used > rxd_max_bytes)
++                rxd_max_bytes = used;
++        }
++        else
++        {
++            rxd_copy++;
 +            Wifi_RxRelease(slot);
++        }
  
          WifiData->stats[WSTAT_TXPACKETS]++;
          WifiData->stats[WSTAT_TXBYTES] += size;

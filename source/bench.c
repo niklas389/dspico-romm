@@ -251,9 +251,46 @@ static uint32_t bench_sd(const config_t *cfg)
 // Network
 // ---------------------------------------------------------------------------
 
+#ifdef DSPICO_DSWIFI
+extern int dswifi_rx_debug(char *buf, int len);
+extern bool dswifi_rx_zero_copy;
+
+static void rx_debug_log(const char *why)
+{
+    static char buf[1024];
+    dswifi_rx_debug(buf, sizeof(buf));
+    log_file_only("  RX ring (%s):\n%s", why, buf);
+}
+#else
+static void rx_debug_log(const char *why) { (void)why; }
+#endif
+
+// Stall detection: logs the zero-copy RX state once if no data arrived for 2 s.
+static uint64_t g_last_bytes;
+static uint32_t g_last_change_ms;
+static bool g_stall_logged;
+
+static void stall_reset(void)
+{
+    g_last_bytes = 0;
+    g_last_change_ms = 0;
+    g_stall_logged = false;
+}
+
 static bool net_progress(void *ctx, uint64_t now, uint64_t total, uint32_t ms)
 {
     (void)ctx;
+    if (now != g_last_bytes)
+    {
+        g_last_bytes = now;
+        g_last_change_ms = ms;
+    }
+    else if (!g_stall_logged && ms - g_last_change_ms > 2000)
+    {
+        g_stall_logged = true;
+        log_printf("  stall at %llu B\n", (unsigned long long)now);
+        rx_debug_log("stall");
+    }
     printf("\x1b[22;0H%3lu%%  %4lu KB/s   ",
            total ? (unsigned long)(now * 100 / total) : 0,
            (unsigned long)kbps(now, ms));
@@ -338,7 +375,9 @@ static bool run_net(const char *label, const char *base, const char *path,
         g_memcpy_stats_on = 1;
         prof_sampling_start();
     }
+    stall_reset();
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
+    rx_debug_log(label);
     if (sample)
     {
         g_memcpy_stats_on = 0;
@@ -367,6 +406,7 @@ static bool run_net(const char *label, const char *base, const char *path,
 
 // Single keep-alive connection, body written to the SD card like a real
 // download. Shows how much SD writes slow down reception.
+__attribute__((unused))
 static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
                        size_t buf_size, const char *label, net_row_t *row)
 {
@@ -407,7 +447,9 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
         g_memcpy_stats_on = 1;
         prof_sampling_start();
     }
+    stall_reset();
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
+    rx_debug_log(label);
     if (sample)
     {
         g_memcpy_stats_on = 0;
@@ -434,9 +476,8 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
 // Like run_net_sd, but SD writes run in a background cothread while the main
 // thread waits for the network.
 static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len,
-                             net_row_t *row)
+                             const char *label, bool sample, net_row_t *row)
 {
-    const char *label = "SD async";
     log_printf("%s...\n", label);
 
     char dir[CFG_PATH_MAX + 16], file[CFG_PATH_MAX + 48];
@@ -472,16 +513,22 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     prof_reset();
     memcpy_stats_reset();
     g_memcpy_stats_on = 1;
-    prof_sampling_start();
+    if (sample)
+        prof_sampling_start();
+    stall_reset();
     bool ok = net_download_range_async(path, 0, len - 1, w, net_progress, NULL, &r);
+    rx_debug_log(label);
     // Count the time to drain the ring: the download isn't done before that.
     uint64_t t0 = prof_ticks();
     uint64_t stall_ticks = sdw_stall_ticks(w);
     bool wok = sdw_close(w); // Drains the ring, then frees the writer
     uint32_t drain_ms = prof_ticks_to_ms(prof_ticks() - t0);
     g_memcpy_stats_on = 0;
-    save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
-    memcpy_stats_log("sd");
+    if (sample)
+    {
+        save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
+        memcpy_stats_log("sd");
+    }
     fclose(f);
     stats_delta(row, &st);
     remove(file);
@@ -530,32 +577,30 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     g_bench_cfg = cfg;
     net_row_t rows[7];
     int nrows = 0;
-    // Parallel connections were shown to be slower (v0.3-v0.10): single
-    // connection only. Compare the DSWiFi default MTU with the configured one;
-    // each run opens a new connection, so the MSS follows the MTU.
+    // v0.12: zero-copy RX stalled once. Run everything in copy mode first,
+    // then the same tests with zero-copy RX, so a stall can't hide results.
     bool go = true;
 #ifdef DSPICO_DSWIFI
-    extern void dswifi_set_mtu(u16 mtu);
-    static char lbl_cfg[16];
-    snprintf(lbl_cfg, sizeof(lbl_cfg), "MTU %d", cfg->mtu);
-    if (cfg->mtu != 1300)
-    {
-        dswifi_set_mtu(1300);
-        go = run_net("MTU 1300", NULL, path, len, 1, false, &rows[nrows++]);
-        dswifi_set_mtu(cfg->mtu);
-    }
+    bool zc_cfg = dswifi_rx_zero_copy;
+    dswifi_rx_zero_copy = false;
+    go = run_net("copy net", NULL, path, len, 1, false, &rows[nrows++]);
     if (go)
-        go = run_net(lbl_cfg, NULL, path, len, 1, true, &rows[nrows++]);
+        go = run_net_sd_async(cfg, path, len, "copy SD", false, &rows[nrows++]);
+    if (go && zc_cfg)
+    {
+        dswifi_rx_zero_copy = true;
+        go = run_net("zc net", NULL, path, len, 1, true, &rows[nrows++]);
+        if (go)
+            go = run_net_sd_async(cfg, path, len, "zc SD", true, &rows[nrows++]);
+        if (go)
+            go = run_net_sd(cfg, path, len, 256 * 1024, "zc SD256", &rows[nrows++]);
+    }
+    dswifi_rx_zero_copy = zc_cfg;
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
+    if (go)
+        go = run_net_sd_async(cfg, path, len, "SD async", true, &rows[nrows++]);
 #endif
-
-    if (go)
-        go = run_net_sd(cfg, path, len, 0, "SD unbuf", &rows[nrows++]);
-    if (go)
-        go = run_net_sd(cfg, path, len, 256 * 1024, "SD 256K", &rows[nrows++]);
-    if (go)
-        go = run_net_sd_async(cfg, path, len, &rows[nrows++]);
 
     if (go && cfg->http_url[0])
         go = run_net("HTTP  x1", cfg->http_url, path, len, 1, false, &rows[nrows++]);
