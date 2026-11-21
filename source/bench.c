@@ -648,7 +648,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     sd = bench_sd(cfg);
 
     g_bench_cfg = cfg;
-    net_row_t rows[7];
+    net_row_t rows[9];
     int nrows = 0;
     // libcurl (v0.13 path) vs the curl-free client (dl.c), both with
     // zero-copy RX (zerocopy= in config.ini).
@@ -661,6 +661,15 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
+    // A/B: the same without yielding after each TLS record (v0.15 behaviour)
+    if (go)
+    {
+        dl_yield_per_record = false;
+        go = run_dl_net("dl net0", path, len, false, &rows[nrows++]);
+        if (go)
+            go = run_net_sd_async(cfg, path, len, "dl SD0", false, true, &rows[nrows++]);
+        dl_yield_per_record = true;
+    }
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
     if (go)

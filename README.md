@@ -79,7 +79,8 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
-| 0.16 | ? | ? | variant with a 93 KB scaled TCP window (`romm-poc-w96.nds`) |
+| 0.17 | ? | ? | download client yields to lwIP after each TLS record |
+| 0.16 | 639 dl / 792 curl | 793 dl / 687 curl | 93 KB scaled window tested: slower in all 4 tests (439-630), dropped |
 | 0.15 | 651 (dl; curl 462) | 808 (dl; curl 493) | zero-copy stall fixed (mailbox migration), ARM7 load measurement |
 | 0.14 | 680 (dl) | 705 (dl) | OpenSSL ARMv4 ChaCha20/Poly1305 assembly; curl-free download client (`dl.c`) |
 | 0.13 | 912 | 702 | same as 0.12, no stall in this run; copy mode: 843 / 576 |

@@ -23,6 +23,16 @@
 #include <mbedtls/x509_crt.h>
 
 #include "log.h"
+
+#ifdef __NDS__
+#include <nds.h>
+#define DL_YIELD() cothread_yield()
+#else
+#define DL_YIELD() ((void)0)
+#endif
+
+// Yield to other cothreads after each TLS record (see the body loop).
+bool dl_yield_per_record = true;
 #include "sdwriter.h"
 
 #define DL_TIMEOUT_MS   30000 // No data for this long: give up (like curl's low-speed limit)
@@ -541,6 +551,13 @@ static bool request_once(const char *path, uint64_t first, uint64_t last,
             sdw_commit(sdw, n);
         got += n;
         p->done = got;
+
+        // Cothreads only switch when one yields. While records are buffered,
+        // this loop never waits, so lwIP's thread would not process incoming
+        // segments (and send ACKs / window updates) until the backlog is
+        // decrypted: the sender stalls. Let it run after every record.
+        if (dl_yield_per_record)
+            DL_YIELD();
     }
     res->body_bytes = got;
     res->wire_bytes = got;
