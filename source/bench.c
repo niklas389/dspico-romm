@@ -359,11 +359,47 @@ static void prof_fill(net_row_t *row, uint32_t total_ms)
 static u32 Wifi_Arm7BusyLines(void) { return 0; }
 #endif
 static u32 g_a7_lines0, g_a7_t0;
+static u32 g_a7p0[8];
+
+#ifdef DSPICO_DSWIFI
+extern void Wifi_Arm7Prof(u32 out[8]);
+#else
+static void Wifi_Arm7Prof(u32 out[8]) { memset(out, 0, 8 * sizeof(u32)); }
+#endif
 
 static void a7_start(void)
 {
     g_a7_lines0 = Wifi_Arm7BusyLines();
     g_a7_t0 = net_now_ms();
+    Wifi_Arm7Prof(g_a7p0);
+}
+
+// ARM7 breakdown since a7_start(): microseconds from scanline sums.
+static void a7_log(void)
+{
+    u32 p[8];
+    Wifi_Arm7Prof(p);
+    for (int i = 0; i < 8; i++)
+        p[i] -= g_a7p0[i];
+    u32 ms = net_now_ms() - g_a7_t0;
+    u32 busy_us = (u32)((u64)(Wifi_Arm7BusyLines() - g_a7_lines0) * 6356 / 100);
+#define US(l) ((u32)((u64)(l) * 6356 / 100))
+    u32 irqs = p[5], pkts = p[6], c52 = p[0], blks = p[2];
+    log_file_only("  ARM7 %lu ms busy of %lu: irqs %lu, pkts %lu, cmd52 %lu (%lu ms), "
+                  "blk %lu x %lu B (%lu ms), queue copy %lu ms\n",
+                  (unsigned long)(busy_us / 1000), (unsigned long)ms,
+                  (unsigned long)irqs, (unsigned long)pkts, (unsigned long)c52,
+                  (unsigned long)(US(p[1]) / 1000), (unsigned long)blks,
+                  (unsigned long)(blks ? p[7] / blks : 0),
+                  (unsigned long)(US(p[3]) / 1000), (unsigned long)(US(p[4]) / 1000));
+    if (pkts)
+        log_file_only("  ARM7 per packet: %lu us busy, %lu cmd52 (%lu us), blk %lu us, "
+                      "queue %lu us, %lu pkts/irq\n",
+                      (unsigned long)(busy_us / pkts), (unsigned long)(c52 / pkts),
+                      (unsigned long)(US(p[1]) / pkts), (unsigned long)(US(p[3]) / pkts),
+                      (unsigned long)(US(p[4]) / pkts),
+                      (unsigned long)(irqs ? pkts / irqs : 0));
+#undef US
 }
 
 // ARM7 Wi-Fi handler load since a7_start(), in percent (1 line = 63.56 us).
@@ -377,6 +413,7 @@ static u32 a7_pct(void)
 static void stats_delta(net_row_t *row, const net_wifi_stats_t *a)
 {
     row->a7_pct = a7_pct();
+    a7_log();
     log_file_only("  ARM7 Wi-Fi busy %lu%%\n", (unsigned long)row->a7_pct);
     net_wifi_stats_t b;
     net_wifi_stats(&b);
@@ -659,22 +696,12 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     // zero-copy RX (zerocopy= in config.ini).
     bool go = true;
 #ifdef DSPICO_DSWIFI
-    go = run_net("curl net", NULL, path, len, 1, false, &rows[nrows++]);
-    if (go)
-        go = run_net_sd_async(cfg, path, len, "curl SD", false, false, &rows[nrows++]);
+    go = run_net_sd_async(cfg, path, len, "curl SD", false, false, &rows[nrows++]);
     if (go)
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
-    // A/B: the same with Mbed TLS decrypting (v0.17 behaviour)
-    if (go)
-    {
-        dl_zero_copy_tls = false;
-        go = run_dl_net("dl netM", path, len, false, &rows[nrows++]);
-        if (go)
-            go = run_net_sd_async(cfg, path, len, "dl SDM", false, true, &rows[nrows++]);
-        dl_zero_copy_tls = true;
-    }
+
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
     if (go)
