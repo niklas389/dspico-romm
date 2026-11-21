@@ -1,0 +1,173 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 0f231ba..48e7ed5 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -187,6 +187,9 @@ static int wifi_card_read_func1_32bit(u32 addr, void* buf, u32 len)
+ 
+     wlan_ctx.tmio.buffer = buf;
+     wlan_ctx.tmio.size = len;
++    // dspico-romm: restore afterwards (upstream left it set, which changes
++    // how every later command waits for completion)
++    bool old_break_early = wlan_ctx.tmio.break_early;
+     wlan_ctx.tmio.break_early = true;
+ 
+     u32 old_blocksize = wlan_ctx.tmio.block_size;
+@@ -196,7 +199,7 @@ static int wifi_card_read_func1_32bit(u32 addr, void* buf, u32 len)
+     wifi_card_send_command_alt(cmd53_read_single,
+             (funcnum << 28) | (1 << 26) | (addr & 0x1FFFF) << 9 | (blkcnt));
+ 
+-    //wlan_ctx.tmio.break_early = false;
++    wlan_ctx.tmio.break_early = old_break_early;
+ 
+     //wifi_sdio_stop();
+ 
+@@ -534,14 +537,9 @@ static void wifi_card_mbox0_sendbytes(const u8 *data, u32 len)
+     }
+     else
+         wifi_card_write_func1_block(send_addr, (void*)data, len);
+-    u32 intval = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
+-    if (intval & 0x00010000) // tx overflow
+-    {
+-        WLOG_PRINTF("T: mbox full 0x%x 0x%x\n",
+-                    (unsigned int)wifi_card_read_func1_u32(F1_HOST_INT_STATUS),
+-                    (unsigned int)wifi_card_read_func1_u8(F1_RX_LOOKAHEAD_VALID));
+-        WLOG_FLUSH();
+-    }
++
++    // dspico-romm: upstream read the 32-bit interrupt status here (4 CMD52,
++    // ~110 us) after every packet, only to log a TX overflow.
+ 
+     //wifi_card_bmi_wait_count4();
+ }
+@@ -683,6 +681,12 @@ void wmi_send_pkt(u16 wmi_type, u8 ack_type, const void *data, u16 len)
+ static bool mbox_has_lookahead = false;
+ static u32 mbox_lookahead = 0;
+ 
++// dspico-romm: set while draining the mailbox from the card IRQ. Then
++// readpkt() does not poll HOST_INT_STATUS up to 100 times (~2.8 ms of CMD52
++// at the end of every IRQ): a lookahead from the previous packet's trailer
++// means another packet is waiting; otherwise one status read decides.
++static bool readpkt_irq_mode = false;
++
+ static u16 wifi_card_mbox0_readbytes(u8 *read_buffer, u32 sz_buf, u32 len_read)
+ {
+ #ifdef SDIO_NO_BLOCKRW
+@@ -726,18 +730,27 @@ u16 wifi_card_mbox0_readpkt(void)
+ {
+     //memset(mbox_buffer, 0, MBOX_TMPBUF_SIZE);
+ 
+-    // Try and wait for mailbox data to arrive
+-    int timeout = 100;
+-    for (; timeout > 0; --timeout)
++    if (readpkt_irq_mode)
+     {
+-        u8 sts = wifi_card_read_func1_u8(F1_HOST_INT_STATUS);
+-        if (sts & 1) // RX FIFO is not empty
+-            break;
++        if (!mbox_has_lookahead &&
++            !(wifi_card_read_func1_u8(F1_HOST_INT_STATUS) & 1)) // RX FIFO empty
++            return 0;
+     }
++    else
++    {
++        // Try and wait for mailbox data to arrive
++        int timeout = 100;
++        for (; timeout > 0; --timeout)
++        {
++            u8 sts = wifi_card_read_func1_u8(F1_HOST_INT_STATUS);
++            if (sts & 1) // RX FIFO is not empty
++                break;
++        }
+ 
+-    // Timed out
+-    if (timeout <= 0)
+-        return 0;
++        // Timed out
++        if (timeout <= 0)
++            return 0;
++    }
+ 
+     u32 header = 0;
+ 
+@@ -746,6 +759,11 @@ u16 wifi_card_mbox0_readpkt(void)
+         header = mbox_lookahead;
+         mbox_has_lookahead = false;
+     }
++    else if (readpkt_irq_mode)
++    {
++        // One 4-byte CMD53 instead of four CMD52
++        header = wifi_card_read_func1_u32_fast(F1_RX_LOOKAHEAD0);
++    }
+     else
+     {
+         header = wifi_card_read_func1_u32(F1_RX_LOOKAHEAD0); // read lookahead
+@@ -1107,11 +1125,20 @@ static int wifi_card_device_init_bmi(void)
+ 
+ static void wifi_card_process_pkts(void)
+ {
+-    // Ack the interrupts
+-    u32 int_sts = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
+-    wifi_card_write_func1_u32(F1_HOST_INT_STATUS, int_sts);
++    // dspico-romm: read the four status bytes with one CMD53 and write back
++    // only the non-zero ones (same values and order as upstream's 32-bit
++    // write, which always cost four CMD52).
++    u32 int_sts = wifi_card_read_func1_u32_fast(F1_HOST_INT_STATUS);
++    for (int b = 3; b >= 0; b--)
++    {
++        u8 v = (int_sts >> (8 * b)) & 0xFF;
++        if (v)
++            wifi_card_write_func1_u8(F1_HOST_INT_STATUS + b, v);
++    }
+ 
++    readpkt_irq_mode = true;
+     while (wifi_card_mbox0_readpkt());
++    readpkt_irq_mode = false;
+ }
+ 
+ static void wifi_card_irq(void)
+diff --git a/source/arm7/twl/rx_queue.twl.c b/source/arm7/twl/rx_queue.twl.c
+index 12b92d7..e449109 100644
+--- a/source/arm7/twl/rx_queue.twl.c
++++ b/source/arm7/twl/rx_queue.twl.c
+@@ -10,6 +10,32 @@
+ #include "arm7/twl/card.h"
+ #include "common/common_twl_defs.h"
+ 
++// dspico-romm: the packet data in the mailbox buffer starts at an address
++// = 2 mod 4 and ring entries are word aligned, so memcpy() falls back to
++// byte stores, which are slow on the ARM7's 16-bit main RAM bus (~7 cycles
++// per byte measured). Merge halfwords into words instead.
++static void copy_to_ring(u8 *dst, const u8 *src, size_t n)
++{
++    if ((((uintptr_t)dst & 3) != 0) || (((uintptr_t)src & 3) != 2) || n < 8)
++    {
++        memcpy(dst, src, n);
++        return;
++    }
++
++    size_t words = (n - 2) / 4;   // Whole words that need only aligned reads
++    u32 *d = (u32 *)dst;
++    const u32 *s = (const u32 *)(src + 2);
++    u32 carry = *(const u16 *)src;
++    for (size_t i = 0; i < words; i++)
++    {
++        u32 w = s[i];
++        d[i] = carry | (w << 16);
++        carry = w >> 16;
++    }
++    size_t done = words * 4;
++    memcpy(dst + done, src + done, n - done);
++}
++
+ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
+ {
+     // Before the packet we will store a u32 with the total data size, so we
+@@ -39,7 +65,7 @@ int Wifi_TWL_RxAddPacketToQueue(const void *src, size_t size)
+     write_idx += sizeof(u32);
+ 
+     // Write data
+-    memcpy(rxbufData + write_idx, src, size);
++    copy_to_ring(rxbufData + write_idx, src, size);
+     write_idx += size;
+ 
+     // Mark the next block as empty, but don't move pointer so that the size of
