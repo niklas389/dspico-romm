@@ -1,0 +1,87 @@
+diff --git a/lwip/source/api/sockets.c b/lwip/source/api/sockets.c
+index b97bdd7..c4329aa 100644
+--- a/lwip/source/api/sockets.c
++++ b/lwip/source/api/sockets.c
+@@ -1311,6 +1311,82 @@ lwip_readv(int s, const struct iovec *iov, int iovcnt)
+   return lwip_recvmsg(s, &msg, 0);
+ }
+ 
++/* dspico-romm: zero-copy receive for TCP sockets. Calls fn(ctx, data, len)
++ * for each contiguous piece of received data, without copying it; fn returns
++ * how many bytes it consumed (0..len). Stops when fn consumes less than it was
++ * given, when no more data is queued, or after max bytes. Never blocks.
++ * Returns the bytes consumed (>= 0; 0 if fn took nothing), or -1 with errno
++ * set: EWOULDBLOCK when nothing is queued, ENOTCONN at the end of the stream. The receive window is updated for the
++ * consumed bytes, exactly like lwip_recv(). fn must not call into lwIP. */
++ssize_t
++lwip_recv_zc(int s, size_t max, size_t (*fn)(void *ctx, const void *data, size_t len),
++             void *ctx)
++{
++  struct lwip_sock *sock = get_socket(s);
++  size_t done = 0;
++
++  if (!sock) {
++    return -1;
++  }
++  if (NETCONNTYPE_GROUP(netconn_type(sock->conn)) != NETCONN_TCP) {
++    done_socket(sock);
++    set_errno(EOPNOTSUPP);
++    return -1;
++  }
++
++  while (done < max) {
++    struct pbuf *p = sock->lastdata.pbuf;
++    if (p == NULL) {
++      err_t err = netconn_recv_tcp_pbuf_flags(sock->conn, &p,
++                                              NETCONN_NOAUTORCVD | NETCONN_DONTBLOCK |
++                                              (done ? NETCONN_NOFIN : 0));
++      if (err != ERR_OK) {
++        if (done > 0) {
++          break;
++        }
++        done_socket(sock);
++        int e = (err == ERR_CLSD) ? ENOTCONN : err_to_errno(err);
++        set_errno(e);
++        return -1;
++      }
++      sock->lastdata.pbuf = p;
++    }
++
++    /* Hand out the pieces of this pbuf chain */
++    size_t used = 0;
++    bool stop = false;
++    for (struct pbuf *q = p; q != NULL && !stop && done + used < max; q = q->next) {
++      size_t n = q->len;
++      if (n > max - done - used) {
++        n = max - done - used;
++      }
++      size_t c = fn(ctx, q->payload, n);
++      used += c;
++      if (c < q->len) {
++        stop = true;
++      }
++    }
++
++    if (used >= p->tot_len) {
++      sock->lastdata.pbuf = NULL;
++      pbuf_free(p);
++    } else if (used > 0) {
++      sock->lastdata.pbuf = pbuf_free_header(p, (u16_t)used);
++    }
++    done += used;
++    if (stop) {
++      break;
++    }
++  }
++
++  if (done > 0) {
++    netconn_tcp_recvd(sock->conn, done);
++  }
++  done_socket(sock);
++  set_errno(0);
++  return (ssize_t)done;
++}
++
+ ssize_t
+ lwip_recv(int s, void *mem, size_t len, int flags)
+ {

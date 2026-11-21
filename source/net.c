@@ -7,6 +7,7 @@
 
 #include <curl/curl.h>
 #include <dswifi9.h>
+#include <nds.h>
 #include <mbedtls/error.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
@@ -337,6 +338,9 @@ static struct curl_slist *setup_handle(CURL *h, const char *url, bool auth,
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(h, CURLOPT_BUFFERSIZE, 64L * 1024);
+    // No DNS cache: a failed lookup (e.g. while Wi-Fi reconnects) would be
+    // cached as negative. Connections are reused, so lookups are rare anyway.
+    curl_easy_setopt(h, CURLOPT_DNS_CACHE_TIMEOUT, 0L);
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, errbuf);
     curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(h, CURLOPT_MAXREDIRS, 3L);
@@ -447,17 +451,40 @@ static bool perform(const char *path, const char *post_json, bool auth,
     return rc == CURLE_OK && !x->write_failed;
 }
 
+// Resolve/connect errors after the access point association was lost:
+// reconnect Wi-Fi and try once more.
+static bool lost_wifi(const net_result_t *res)
+{
+    return (res->curl_code == CURLE_COULDNT_RESOLVE_HOST ||
+            res->curl_code == CURLE_COULDNT_CONNECT) &&
+           Wifi_AssocStatus() != ASSOCSTATUS_ASSOCIATED;
+}
+
 bool net_get(const char *path, bool auth, buf_t *out, net_result_t *res)
 {
     xfer_t x = { .mem = out, .res = res };
-    return perform(path, NULL, auth, true, NULL, &x);
+    bool ok = perform(path, NULL, auth, true, NULL, &x);
+    if (!ok && lost_wifi(res) && net_wifi_ensure())
+    {
+        if (out)
+            buf_free(out);
+        ok = perform(path, NULL, auth, true, NULL, &x);
+    }
+    return ok;
 }
 
 bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
                    net_result_t *res)
 {
     xfer_t x = { .mem = out, .res = res };
-    return perform(path, json, auth, true, NULL, &x);
+    bool ok = perform(path, json, auth, true, NULL, &x);
+    if (!ok && lost_wifi(res) && net_wifi_ensure())
+    {
+        if (out)
+            buf_free(out);
+        ok = perform(path, json, auth, true, NULL, &x);
+    }
+    return ok;
 }
 
 void net_wifi_stats(net_wifi_stats_t *out)
@@ -465,6 +492,37 @@ void net_wifi_stats(net_wifi_stats_t *out)
     out->rx_queued = Wifi_GetStats(WSTAT_RXQUEUEDPACKETS);
     out->rx_lost = Wifi_GetStats(WSTAT_RXQUEUEDLOST);
     out->tx_rejected = Wifi_GetStats(WSTAT_TXQUEUEDREJECTED);
+}
+
+const char *net_wifi_status(void)
+{
+    int s = Wifi_AssocStatus();
+    return (s >= 0 && s <= ASSOCSTATUS_CANNOTCONNECT) ? ASSOCSTATUS_STRINGS[s] : "?";
+}
+
+bool net_wifi_ensure(void)
+{
+    if (Wifi_AssocStatus() == ASSOCSTATUS_ASSOCIATED)
+        return true;
+
+    log_printf("Wi-Fi lost (%s), reconnecting\n", net_wifi_status());
+    Wifi_AutoConnect();
+    uint32_t t0 = net_now_ms();
+    while (net_now_ms() - t0 < 20000)
+    {
+        int s = Wifi_AssocStatus();
+        if (s == ASSOCSTATUS_ASSOCIATED)
+        {
+            log_printf("Wi-Fi: reconnected in %lu ms\n",
+                       (unsigned long)(net_now_ms() - t0));
+            return true;
+        }
+        if (s == ASSOCSTATUS_CANNOTCONNECT)
+            break;
+        swiWaitForVBlank(); // Lets the Wi-Fi threads run
+    }
+    log_printf("Wi-Fi: reconnect failed (%s)\n", net_wifi_status());
+    return false;
 }
 
 bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *fp,

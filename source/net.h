@@ -31,6 +31,7 @@ typedef struct
     uint64_t wire_bytes;    // Bytes received on the wire (CURLINFO_SIZE_DOWNLOAD_T)
     const char *tls_version;
     const char *tls_cipher;
+    bool zero_copy_tls;     // dl.c: body decrypted by tlsrx (no Mbed TLS copies)
 } net_result_t;
 
 // Called during downloads. Return false to abort the transfer.
@@ -99,6 +100,13 @@ typedef struct
 } net_wifi_stats_t;
 
 void net_wifi_stats(net_wifi_stats_t *out);
+
+// Association state as text (DSWiFi ASSOCSTATUS_STRINGS).
+const char *net_wifi_status(void);
+
+// Reconnects (WFC settings) if the access point association was lost.
+// Waits up to 20 s. Returns true when associated.
+bool net_wifi_ensure(void);
 
 // URL-encodes a path segment. The returned string must be freed with free().
 char *net_escape(const char *s);

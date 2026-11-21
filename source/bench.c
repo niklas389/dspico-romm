@@ -253,6 +253,7 @@ static uint32_t bench_sd(const config_t *cfg)
 // ---------------------------------------------------------------------------
 
 #ifdef DSPICO_DSWIFI
+extern u32 Wifi_Arm7BusyLines(void);
 extern int dswifi_rx_debug(char *buf, int len);
 extern bool dswifi_rx_zero_copy;
 
@@ -260,7 +261,8 @@ static void rx_debug_log(const char *why)
 {
     static char buf[1024];
     dswifi_rx_debug(buf, sizeof(buf));
-    log_file_only("  RX ring (%s):\n%s", why, buf);
+    log_file_only("  RX ring (%s), Wi-Fi %s, ARM7 lines %lu:\n%s", why,
+                  net_wifi_status(), (unsigned long)Wifi_Arm7BusyLines(), buf);
 }
 #else
 static void rx_debug_log(const char *why) { (void)why; }
@@ -273,6 +275,7 @@ static bool g_stall_logged;
 
 static void stall_reset(void)
 {
+    net_wifi_ensure();
     g_last_bytes = 0;
     g_last_change_ms = 0;
     g_stall_logged = false;
@@ -352,9 +355,7 @@ static void prof_fill(net_row_t *row, uint32_t total_ms)
                   (unsigned long)sd, (unsigned long)total_ms);
 }
 
-#ifdef DSPICO_DSWIFI
-extern u32 Wifi_Arm7BusyLines(void);
-#else
+#ifndef DSPICO_DSWIFI
 static u32 Wifi_Arm7BusyLines(void) { return 0; }
 #endif
 static u32 g_a7_lines0, g_a7_t0;
@@ -571,6 +572,9 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     row->ok = ok && wok && r.body_bytes == len && r.status == 206;
     row->raw_kbps = kbps(r.body_bytes, total_ms);
     row->steady_kbps = row->raw_kbps;
+    if (use_dl)
+        log_file_only("  %s%s\n", r.zero_copy_tls ? "zero-copy TLS" : "Mbed TLS decrypt",
+                      r.error[0] ? "" : "");
     log_printf("  ring full %lu ms, drain %lu ms\n",
                (unsigned long)prof_ticks_to_ms(stall_ticks),
                (unsigned long)drain_ms);
@@ -611,11 +615,12 @@ static bool run_dl_net(const char *label, const char *path, uint64_t len,
     uint32_t steady_ms = r.total_ms > r.ttfb_ms ? r.total_ms - r.ttfb_ms : 0;
     row->steady_kbps = kbps(r.body_bytes, steady_ms);
     log_file_only("  bytes %llu, total %lu ms, connect %lu, tls %lu, ttfb %lu ms, "
-                  "HTTP %ld, %s %s\n",
+                  "HTTP %ld, %s %s%s\n",
                   (unsigned long long)r.body_bytes, (unsigned long)r.total_ms,
                   (unsigned long)r.connect_ms, (unsigned long)r.tls_ms,
                   (unsigned long)r.ttfb_ms, r.status,
-                  r.tls_version ? r.tls_version : "-", r.tls_cipher ? r.tls_cipher : "-");
+                  r.tls_version ? r.tls_version : "-", r.tls_cipher ? r.tls_cipher : "-",
+                  r.zero_copy_tls ? ", zero-copy TLS" : "");
     if (!row->ok)
         log_printf("  FAILED: %s\n", r.error[0] ? r.error : "short/bad status");
     return r.curl_code != 42;
@@ -661,14 +666,14 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
-    // A/B: the same without yielding after each TLS record (v0.15 behaviour)
+    // A/B: the same with Mbed TLS decrypting (v0.17 behaviour)
     if (go)
     {
-        dl_yield_per_record = false;
-        go = run_dl_net("dl net0", path, len, false, &rows[nrows++]);
+        dl_zero_copy_tls = false;
+        go = run_dl_net("dl netM", path, len, false, &rows[nrows++]);
         if (go)
-            go = run_net_sd_async(cfg, path, len, "dl SD0", false, true, &rows[nrows++]);
-        dl_yield_per_record = true;
+            go = run_net_sd_async(cfg, path, len, "dl SDM", false, true, &rows[nrows++]);
+        dl_zero_copy_tls = true;
     }
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);

@@ -34,11 +34,19 @@
 // Yield to other cothreads after each TLS record (see the body loop).
 bool dl_yield_per_record = true;
 #include "sdwriter.h"
+#include "tlsrx.h"
+
+// Decrypt TLS records ourselves, straight from the network buffers (tlsrx.h).
+bool dl_zero_copy_tls = true;
+
+// DSWiFi lwIP patch (patches/dswifi-recv-zc.patch)
+ssize_t lwip_recv_zc(int s, size_t max,
+                     size_t (*fn)(void *ctx, const void *data, size_t len), void *ctx);
 
 #define DL_TIMEOUT_MS   30000 // No data for this long: give up (like curl's low-speed limit)
 #define DL_POLL_MS      250   // Progress callback / cancel check interval while waiting
 #define DL_HDR_MAX      8192
-#define DL_DISCARD_SIZE (16 * 1024)
+#define DL_DISCARD_SIZE TLSRX_MAX_PLAIN // Also the bounce buffer for tlsrx
 
 typedef struct
 {
@@ -52,6 +60,8 @@ typedef struct
     mbedtls_x509_crt ca;
     mbedtls_ssl_config conf;
     mbedtls_ssl_context ssl;
+    uint8_t srv_secret[32];  // TLS 1.3 server application traffic secret
+    bool have_secret;
 } dl_state_t;
 
 static dl_state_t g_dl;
@@ -234,6 +244,25 @@ static bool tls_setup(net_result_t *res)
     return true;
 }
 
+// Keeps the server application traffic secret for tlsrx (TLS 1.3 only).
+static void export_keys_cb(void *ctx, mbedtls_ssl_key_export_type type,
+                           const unsigned char *secret, size_t secret_len,
+                           const unsigned char client_random[32],
+                           const unsigned char server_random[32],
+                           mbedtls_tls_prf_types tls_prf_type)
+{
+    (void)client_random;
+    (void)server_random;
+    (void)tls_prf_type;
+    dl_state_t *d = ctx;
+    if (type == MBEDTLS_SSL_KEY_EXPORT_TLS1_3_SERVER_APPLICATION_TRAFFIC_SECRET &&
+        secret_len == sizeof(d->srv_secret))
+    {
+        memcpy(d->srv_secret, secret, secret_len);
+        d->have_secret = true;
+    }
+}
+
 static bool dl_connect(progress_t *p, net_result_t *res)
 {
     if (g_dl.connected)
@@ -283,6 +312,8 @@ static bool dl_connect(progress_t *p, net_result_t *res)
         return false;
     }
     mbedtls_ssl_set_bio(&g_dl.ssl, &g_dl.fd, bio_send, bio_recv, NULL);
+    g_dl.have_secret = false;
+    mbedtls_ssl_set_export_keys_cb(&g_dl.ssl, export_keys_cb, &g_dl);
     g_dl.connected = true;
 
     p->last_data = net_now_ms();
@@ -384,6 +415,137 @@ static bool header_value(const char *hdrs, const char *name, char *out, size_t o
         }
     }
     return false;
+}
+
+// True when the rest of the stream can be decrypted by tlsrx: TLS 1.3 with
+// ChaCha20-Poly1305, and Mbed TLS holds no unread data (it reads exactly one
+// record at a time, so the socket is then positioned at a record boundary).
+static bool zc_possible(void)
+{
+    mbedtls_ssl_context *ssl = &g_dl.ssl;
+    return dl_zero_copy_tls && g_dl.have_secret &&
+           mbedtls_ssl_get_ciphersuite_id_from_ssl(ssl) ==
+               MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256 &&
+           mbedtls_ssl_get_bytes_avail(ssl) == 0 &&
+           ssl->MBEDTLS_PRIVATE(in_left) == 0;
+}
+
+static uint64_t be64(const unsigned char *b)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++)
+        v = (v << 8) | b[i];
+    return v;
+}
+
+// Receives body bytes [*got, body_len) with tlsrx. Afterwards Mbed TLS's
+// record counter is updated, so the connection can be reused.
+static bool zc_body(sdwriter_t *sdw, unsigned char *bounce, uint64_t *got,
+                    uint64_t body_len, progress_t *p, net_result_t *res)
+{
+    unsigned char *ctr = g_dl.ssl.MBEDTLS_PRIVATE(in_ctr);
+    static tlsrx_t z;
+    if (!tlsrx_init(&z, g_dl.srv_secret, be64(ctr)))
+    {
+        snprintf(res->error, sizeof(res->error), "tlsrx init failed");
+        return false;
+    }
+
+    bool ok = false;
+    bool in_ring = false;
+    while (*got < body_len)
+    {
+        if (!z.dst)
+        {
+            size_t avail = 0;
+            unsigned char *r = NULL;
+            if (sdw && !(r = sdw_reserve(sdw, &avail)))
+            {
+                snprintf(res->error, sizeof(res->error), "SD write failed");
+                goto out;
+            }
+            in_ring = r && avail >= TLSRX_MAX_PLAIN;
+            z.dst = in_ring ? r : bounce;
+        }
+
+        ssize_t n = lwip_recv_zc(g_dl.fd, SIZE_MAX, tlsrx_feed, &z);
+        if (n < 0)
+        {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+            {
+                if (!wait_fd(MBEDTLS_ERR_SSL_WANT_READ, p, res))
+                    goto out;
+                continue;
+            }
+            snprintf(res->error, sizeof(res->error),
+                     errno == ENOTCONN ? "connection closed early" : "recv failed (%d)",
+                     errno);
+            goto out;
+        }
+        if (n > 0)
+            p->last_data = net_now_ms();
+        if (z.error)
+        {
+            snprintf(res->error, sizeof(res->error), "%s", z.error);
+            res->curl_code = 56;
+            goto out;
+        }
+        if (!z.rec_ready)
+            continue;
+        z.rec_ready = false;
+
+        if (z.rec_type == 23) // application_data
+        {
+            if (z.rec_len > body_len - *got)
+            {
+                snprintf(res->error, sizeof(res->error), "more data than Content-Length");
+                goto out;
+            }
+            if (sdw)
+            {
+                if (in_ring)
+                    sdw_commit(sdw, z.rec_len);
+                else if (!sdw_write(sdw, bounce, z.rec_len))
+                {
+                    snprintf(res->error, sizeof(res->error), "SD write failed");
+                    goto out;
+                }
+            }
+            *got += z.rec_len;
+            p->done = *got;
+            z.dst = NULL;
+            if (dl_yield_per_record)
+                DL_YIELD();
+        }
+        else if (z.rec_type == 22) // handshake, e.g. NewSessionTicket: ignore
+        {
+            if (z.rec_len > 0 && z.dst[0] != 4)
+            {
+                snprintf(res->error, sizeof(res->error),
+                         "TLS handshake message %u during download", z.dst[0]);
+                goto out;
+            }
+        }
+        else if (z.rec_type == 21) // alert
+        {
+            snprintf(res->error, sizeof(res->error), "TLS alert %u/%u",
+                     z.rec_len > 0 ? z.dst[0] : 0, z.rec_len > 1 ? z.dst[1] : 0);
+            goto out;
+        }
+        else
+        {
+            snprintf(res->error, sizeof(res->error), "TLS record type %u", z.rec_type);
+            goto out;
+        }
+    }
+    ok = true;
+
+out:
+    // Hand the record counter back to Mbed TLS (big-endian)
+    for (int i = 0; i < 8; i++)
+        ctr[i] = (unsigned char)(z.seq >> (56 - 8 * i));
+    tlsrx_free(&z);
+    return ok;
 }
 
 static bool request_once(const char *path, uint64_t first, uint64_t last,
@@ -526,6 +688,18 @@ static bool request_once(const char *path, uint64_t first, uint64_t last,
     // into the writer's ring.
     while (got < body_len)
     {
+        // Rest of the body without Mbed TLS's copies (see tlsrx.h)
+        if (body_len != UINT64_MAX && zc_possible())
+        {
+            res->zero_copy_tls = true;
+            if (!zc_body(sdw, discard, &got, body_len, p, res))
+            {
+                dl_close();
+                return false;
+            }
+            break;
+        }
+
         size_t avail = DL_DISCARD_SIZE;
         unsigned char *dst = discard;
         if (sdw && !(dst = sdw_reserve(sdw, &avail)))

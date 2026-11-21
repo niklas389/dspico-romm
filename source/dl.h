@@ -26,6 +26,9 @@ bool dl_get_range(const char *path, uint64_t first, uint64_t last,
 // Yield to lwIP's thread after every TLS record (default true; speed test A/B).
 extern bool dl_yield_per_record;
 
+// Decrypt TLS records directly from the network buffers (default true).
+extern bool dl_zero_copy_tls;
+
 // Closes the keep-alive connection (the next call reconnects).
 void dl_close(void);
 

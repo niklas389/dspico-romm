@@ -24,6 +24,8 @@ class H(http.server.BaseHTTPRequestHandler):
         for i in range(0, len(body), 3000):   # odd write sizes -> odd TLS records
             self.wfile.write(body[i:i+3000])
 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("cert.pem", "key.pem")
+ctx.options &= ~ssl.OP_CIPHER_SERVER_PREFERENCE  # honour the client order (ChaCha20 first)
+ctx.num_tickets = 2
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 8443), H)
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 srv.serve_forever()
