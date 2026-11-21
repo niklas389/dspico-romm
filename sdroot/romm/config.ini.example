@@ -1,0 +1,9 @@
+; Copy to <SD>/romm/config.ini
+; Base URL of your RomM server, no trailing slash.
+url=https://romm.example.com
+
+; 1 = skip certificate verification. Diagnostics only.
+insecure=0
+
+; 1 = write the full curl/TLS trace (no bodies, token redacted) to poc.log
+verbose=1
