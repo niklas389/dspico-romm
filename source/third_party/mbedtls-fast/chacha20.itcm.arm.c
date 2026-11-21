@@ -34,6 +34,9 @@
 
 #define CHACHA20_BLOCK_SIZE_BYTES (4U * 16U)
 
+void ChaCha20_ctr32(unsigned char *out, const unsigned char *inp, size_t len,
+                    const uint32_t key[8], const uint32_t counter[4]);
+
 /*
  * dspico-romm: keystream block with the whole state in local variables.
  *
@@ -148,6 +151,7 @@ int mbedtls_chacha20_starts(mbedtls_chacha20_context *ctx,
         dw[w] = sw[w] ^ k;                                                    \
     }
 
+__attribute__((unused))
 static void xor_block64(unsigned char *out, const unsigned char *in,
                         const uint32_t *ks)
 {
@@ -207,17 +211,22 @@ int mbedtls_chacha20_update(mbedtls_chacha20_context *ctx,
         size--;
     }
 
-    /* Process full blocks */
-    while (size >= CHACHA20_BLOCK_SIZE_BYTES) {
-        /* Generate new keystream block and increment counter */
-        chacha20_block(ctx->state, ctx->keystream8);
-        ctx->state[CHACHA20_CTR_INDEX]++;
+    /* Process full blocks.
+     * dspico-romm: OpenSSL's ARMv4 integer assembly (chacha-armv4.S,
+     * CRYPTOGAMS) generates the keystream with the state in registers and
+     * XORs it straight into the output, also for unaligned buffers. It takes
+     * the key (state[4..11]) and counter + nonce (state[12..15]) and does not
+     * update the counter. */
+    if (size >= CHACHA20_BLOCK_SIZE_BYTES) {
+        size_t nblocks = size / CHACHA20_BLOCK_SIZE_BYTES;
+        size_t n = nblocks * CHACHA20_BLOCK_SIZE_BYTES;
 
-        xor_block64(output + offset, input + offset,
-                    (const uint32_t *) ctx->keystream8);
+        ChaCha20_ctr32(output + offset, input + offset, n,
+                       &ctx->state[4], &ctx->state[CHACHA20_CTR_INDEX]);
+        ctx->state[CHACHA20_CTR_INDEX] += (uint32_t) nblocks;
 
-        offset += CHACHA20_BLOCK_SIZE_BYTES;
-        size   -= CHACHA20_BLOCK_SIZE_BYTES;
+        offset += n;
+        size   -= n;
     }
 
     /* Last (partial) block */

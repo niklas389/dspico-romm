@@ -26,7 +26,8 @@ WND_LABEL	?= stock-4x1460-rx12
 WND_BYTES	?= 5840
 
 SOURCEDIRS	:= source
-INCLUDEDIRS	:= source source/third_party/cjson source/third_party/qrcodegen
+INCLUDEDIRS	:= source source/third_party/cjson source/third_party/qrcodegen \
+		   source/third_party/openssl-armv4
 
 # The ARM7 core must match the DSWiFi build (shared RX buffer layout).
 ARM7ELF		?= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi.elf
