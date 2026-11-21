@@ -102,6 +102,7 @@ typedef struct
     uint64_t done, total;
     uint32_t t0;
     uint32_t last_data;
+    uint32_t last_cb;
     bool cancelled;
 } progress_t;
 
@@ -116,17 +117,22 @@ static bool wait_fd(int want, progress_t *p, net_result_t *res)
     poll(&pfd, 1, DL_POLL_MS);
 
     uint32_t now = net_now_ms();
+    if (now - p->last_data > DL_TIMEOUT_MS)
+    {
+        snprintf(res->error, sizeof(res->error), "Timeout was reached");
+        res->curl_code = 28; // CURLE_OPERATION_TIMEDOUT
+        return false;
+    }
+
+    // The callback prints to the console: call it at most every 100 ms.
+    if (now - p->last_cb < 100)
+        return true;
+    p->last_cb = now;
     if (p->cb && !p->cb(p->ctx, p->done, p->total, now - p->t0))
     {
         p->cancelled = true;
         snprintf(res->error, sizeof(res->error), "cancelled");
         res->curl_code = 42; // Same code curl uses (CURLE_ABORTED_BY_CALLBACK)
-        return false;
-    }
-    if (now - p->last_data > DL_TIMEOUT_MS)
-    {
-        snprintf(res->error, sizeof(res->error), "Timeout was reached");
-        res->curl_code = 28; // CURLE_OPERATION_TIMEDOUT
         return false;
     }
     return true;

@@ -1,0 +1,83 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 2dadd22..39f682e 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -13,6 +13,7 @@
+ #include <nds/arm7/serial.h>
+ 
+ #include "arm7/debug.h"
++#include "arm7/ipc.h"
+ #include "arm7/twl/card.h"
+ #include "arm7/twl/ndma.h"
+ #include "arm7/twl/rx_queue.h"
+@@ -1092,10 +1093,14 @@ static void wifi_card_process_pkts(void)
+ 
+ static void wifi_card_irq(void)
+ {
+-    Wifi_RandomAddEntropy(REG_VCOUNT);
++    u32 v0 = REG_VCOUNT;
++    Wifi_RandomAddEntropy(v0);
+ 
+     wifi_card_process_pkts();
+ 
++    if (WifiData)
++        WifiData->arm7_busy_lines += (REG_VCOUNT + 263 - v0) % 263;
++
+     //wmi_tick(); // TODO
+ }
+ 
+diff --git a/source/arm7/twl/update.twl.c b/source/arm7/twl/update.twl.c
+index ca720cf..828f174 100644
+--- a/source/arm7/twl/update.twl.c
++++ b/source/arm7/twl/update.twl.c
+@@ -18,7 +18,18 @@
+ #include "arm7/twl/ath/wmi.h"
+ #include "common/mac_addresses.h"
+ 
++static void Wifi_TWL_Update_(void);
++
++// dspico-romm: measures the ARM7 time spent here (see arm7_busy_lines).
+ void Wifi_TWL_Update(void)
++{
++    u32 v0 = REG_VCOUNT;
++    Wifi_TWL_Update_();
++    if (WifiData)
++        WifiData->arm7_busy_lines += (REG_VCOUNT + 263 - v0) % 263;
++}
++
++static void Wifi_TWL_Update_(void)
+ {
+     if (WifiData == NULL)
+         return;
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index df305a8..109b6df 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -314,6 +314,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
+     }
+ }
+ 
++// dspico-romm: ARM7 Wi-Fi handler time in scanlines (63.56 us each).
++u32 Wifi_Arm7BusyLines(void)
++{
++    return WifiData ? WifiData->arm7_busy_lines : 0;
++}
++
+ void Wifi_Update(void)
+ {
+     if (!WifiData)
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index f9d1b76..574e953 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -278,6 +278,10 @@ typedef struct WIFI_MAINSTRUCT
+     // End
+     // ---
+ 
++    // dspico-romm: time the ARM7 spends in the DSi Wi-Fi handlers (card IRQ
++    // and the 1 ms update tick), in LCD scanlines (63.56 us each).
++    u32 arm7_busy_lines;
++
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+ 

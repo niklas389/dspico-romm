@@ -308,6 +308,7 @@ typedef struct
     uint32_t rx_lost;      // ... dropped because the ring buffer was full
     uint32_t wait_pct;     // Main thread blocked waiting for the network
     uint32_t sd_pct;       // Time in fwrite() (SD card)
+    uint32_t a7_pct;       // ARM7 time in the Wi-Fi handlers
     bool ok;
 } net_row_t;
 
@@ -351,8 +352,31 @@ static void prof_fill(net_row_t *row, uint32_t total_ms)
                   (unsigned long)sd, (unsigned long)total_ms);
 }
 
+#ifdef DSPICO_DSWIFI
+extern u32 Wifi_Arm7BusyLines(void);
+#else
+static u32 Wifi_Arm7BusyLines(void) { return 0; }
+#endif
+static u32 g_a7_lines0, g_a7_t0;
+
+static void a7_start(void)
+{
+    g_a7_lines0 = Wifi_Arm7BusyLines();
+    g_a7_t0 = net_now_ms();
+}
+
+// ARM7 Wi-Fi handler load since a7_start(), in percent (1 line = 63.56 us).
+static u32 a7_pct(void)
+{
+    u32 ms = net_now_ms() - g_a7_t0;
+    u64 us = (u64)(Wifi_Arm7BusyLines() - g_a7_lines0) * 6356 / 100;
+    return ms ? (u32)(us / 10 / ms) : 0;
+}
+
 static void stats_delta(net_row_t *row, const net_wifi_stats_t *a)
 {
+    row->a7_pct = a7_pct();
+    log_file_only("  ARM7 Wi-Fi busy %lu%%\n", (unsigned long)row->a7_pct);
     net_wifi_stats_t b;
     net_wifi_stats(&b);
     row->rx_queued = b.rx_queued - a->rx_queued;
@@ -368,6 +392,7 @@ static bool run_net(const char *label, const char *base, const char *path,
     log_printf("%s...\n", label);
     net_wifi_stats_t st;
     net_wifi_stats(&st);
+    a7_start();
     net_par_result_t r;
     prof_reset();
     if (sample)
@@ -438,6 +463,7 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
 
     net_wifi_stats_t st;
     net_wifi_stats(&st);
+    a7_start();
     net_result_t r;
     prof_reset();
     (void)buf_size;
@@ -511,6 +537,7 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
 
     net_wifi_stats_t st;
     net_wifi_stats(&st);
+    a7_start();
     net_result_t r;
     prof_reset();
     memcpy_stats_reset();
@@ -563,6 +590,7 @@ static bool run_dl_net(const char *label, const char *path, uint64_t len,
     row->label = label;
     net_wifi_stats_t st;
     net_wifi_stats(&st);
+    a7_start();
     net_result_t r;
     prof_reset();
     if (sample)
@@ -651,20 +679,22 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
     log_printf("SD write     %lu KB/s (best)\n", (unsigned long)sd);
     log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
-    log_printf("test     KB/s lost wait  sd  cpu\n");
+    log_printf("test     KB/s lost wait  sd  cpu a7\n");
     for (int i = 0; i < nrows; i++)
     {
         uint32_t busy = rows[i].wait_pct + rows[i].sd_pct;
-        log_printf("%-8s %4lu %4lu %3lu%% %2lu%% %3lu%%%s\n", rows[i].label,
+        log_printf("%-8s %4lu %4lu %3lu%% %2lu%% %3lu%%%2lu%s\n", rows[i].label,
                    (unsigned long)rows[i].steady_kbps,
                    (unsigned long)rows[i].rx_lost,
                    (unsigned long)rows[i].wait_pct,
                    (unsigned long)rows[i].sd_pct,
                    (unsigned long)(busy < 100 ? 100 - busy : 0),
-                   rows[i].ok ? "" : " F");
+                   (unsigned long)rows[i].a7_pct,
+                   rows[i].ok ? "" : "F");
     }
     log_printf("wait: blocked on network\n"
-               "cpu: TLS, curl, copies\n");
+               "cpu: TLS, curl, copies\n"
+               "a7: ARM7 Wi-Fi handler load %%\n");
     for (int i = 0; i < nrows; i++)
         log_file_only("  %s: rx_queued %lu, rx_lost %lu\n", rows[i].label,
                       (unsigned long)rows[i].rx_queued,

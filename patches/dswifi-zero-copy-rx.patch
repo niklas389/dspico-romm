@@ -37,10 +37,10 @@ index 1192570..dc6117b 100644
  #define MEM_LIBC_MALLOC             1
  #define MEMP_MEM_MALLOC             1
 diff --git a/source/arm9/lwip/lwip_nds.h b/source/arm9/lwip/lwip_nds.h
-index 66e63f9..823583e 100644
+index 66e63f9..8225fb6 100644
 --- a/source/arm9/lwip/lwip_nds.h
 +++ b/source/arm9/lwip/lwip_nds.h
-@@ -46,6 +46,17 @@ bool wifi_get_ip6(struct in6_addr *addr);
+@@ -46,6 +46,19 @@ bool wifi_get_ip6(struct in6_addr *addr);
  void dswifi_send_data_to_lwip(void *data, u32 len);
  void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload, u32 len);
  void dswifi_set_mtu(u16 mtu);
@@ -50,6 +50,8 @@ index 66e63f9..823583e 100644
 +bool dswifi_send_ref_to_lwip(void *frame, u32 len, int slot);
 +void Wifi_RxRelease(int slot);
 +int dswifi_rx_ref_count(int slot);
++bool dswifi_rx_is_ref(const void *p);
++int dswifi_rx_migrate_mboxes(void);
 +// Writes a one-line-per-item summary of the zero-copy RX state (debugging).
 +int dswifi_rx_debug(char *buf, int len);
 +extern bool dswifi_rx_zero_copy;  // Set by the application (default on)
@@ -59,10 +61,10 @@ index 66e63f9..823583e 100644
  
  void dswifi_lwip_setup_io_posix(void);
 diff --git a/source/arm9/lwip/netif.c b/source/arm9/lwip/netif.c
-index a1bc0ad..a224587 100644
+index a1bc0ad..5f55646 100644
 --- a/source/arm9/lwip/netif.c
 +++ b/source/arm9/lwip/netif.c
-@@ -110,6 +110,37 @@ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload,
+@@ -110,6 +110,43 @@ void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload,
          pbuf_free(p);
  }
  
@@ -74,6 +76,12 @@ index a1bc0ad..a224587 100644
 +{
 +    struct pbuf_custom *pc = (struct pbuf_custom *)p;
 +    Wifi_RxRelease(pc - dswifi_rx_ref);
++}
++
++bool dswifi_rx_is_ref(const void *p)
++{
++    const struct pbuf_custom *pc = p;
++    return pc >= &dswifi_rx_ref[0] && pc < &dswifi_rx_ref[WIFI_RXQ_SLOTS];
 +}
 +
 +int dswifi_rx_ref_count(int slot)
@@ -148,8 +156,57 @@ index bfac7cc..3cca5c9 100644
  }
  
  void Wifi_SendPacketToLwip(u8 *packet, size_t size)
+diff --git a/source/arm9/lwip/sys.c b/source/arm9/lwip/sys.c
+index 99c1261..0dd5f07 100644
+--- a/source/arm9/lwip/sys.c
++++ b/source/arm9/lwip/sys.c
+@@ -8,6 +8,7 @@
+ 
+ #include "lwip/sys.h"
+ #include "lwip/tcpip.h"
++#include "lwip/pbuf.h"
+ 
+ #include "arm9/ipc.h"
+ #include "arm9/lwip/lwip_nds.h"
+@@ -182,6 +183,36 @@ static sys_mbox_internal *get_mbox(sys_mbox_t value)
+     return dswifi_mbox[index];
+ }
+ 
++// dspico-romm: zero-copy RX. A pbuf that references the RX ring and sits in
++// a mailbox nobody reads (e.g. a TLS close_notify on an idle keep-alive
++// socket) would block the ring forever, because ring space is returned in
++// order. Replace such pbufs with copies in normal RAM. Only mailbox entries
++// that are themselves one of our reference pbufs are touched (other entries
++// can be messages or markers, not pbufs). Returns the number replaced.
++int dswifi_rx_migrate_mboxes(void)
++{
++    int moved = 0;
++    for (int i = 0; i < MBOX_NUMBER; i++)
++    {
++        sys_mbox_internal *m = dswifi_mbox[i];
++        if (m == NULL)
++            continue;
++        for (size_t k = m->out_ptr; k != m->in_ptr; k = (k + 1 == m->size) ? 0 : k + 1)
++        {
++            struct pbuf *p = (struct pbuf *)m->arr[k];
++            if (!dswifi_rx_is_ref(p))
++                continue;
++            struct pbuf *q = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
++            if (q == NULL)
++                return moved; // Out of memory: try again later
++            m->arr[k] = (uintptr_t)q;
++            pbuf_free(p); // Releases the ring entries of the whole chain
++            moved++;
++        }
++    }
++    return moved;
++}
++
+ err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
+ {
+     err_t ret = ERR_OK;
 diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
-index ff705d9..5dca25b 100644
+index ff705d9..df305a8 100644
 --- a/source/arm9/wifi_arm9.c
 +++ b/source/arm9/wifi_arm9.c
 @@ -3,6 +3,8 @@
@@ -161,7 +218,7 @@ index ff705d9..5dca25b 100644
  #include <dswifi9.h>
  
  #include "arm9/wifi_arm9.h"
-@@ -87,11 +89,126 @@ static void Wifi_NTR_Update(void)
+@@ -87,11 +89,140 @@ static void Wifi_NTR_Update(void)
      }
  }
  
@@ -190,7 +247,8 @@ index ff705d9..5dca25b 100644
 +static u32 rx_parse_idx;
 +
 +// Diagnostics
-+static u32 rxd_zc, rxd_copy, rxd_max_count, rxd_max_bytes, rxd_qfull;
++static u32 rxd_zc, rxd_copy, rxd_max_count, rxd_max_bytes, rxd_qfull, rxd_migrated;
++static u32 rx_last_migrate_ms;
 +
 +#include "lwip/sys.h"
 +
@@ -208,11 +266,12 @@ index ff705d9..5dca25b 100644
 +    u8 *ring = (u8 *)memCached((void *)WifiData->rxbufData);
 +    int n = snprintf(buf, len,
 +                     "rxq count %u used %lu B (max %lu / %lu B) qfull %lu\n"
-+                     "rxq zc %lu copy %lu rd %lu parse %lu wr %lu\n",
++                     "rxq zc %lu copy %lu migrated %lu rd %lu parse %lu wr %lu\n",
 +                     rxq_count, (unsigned long)(rxq_count ? rxq_used_bytes() : 0),
 +                     (unsigned long)rxd_max_count, (unsigned long)rxd_max_bytes,
 +                     (unsigned long)rxd_qfull, (unsigned long)rxd_zc,
-+                     (unsigned long)rxd_copy, (unsigned long)WifiData->rxbufRead,
++                     (unsigned long)rxd_copy, (unsigned long)rxd_migrated,
++                     (unsigned long)WifiData->rxbufRead,
 +                     (unsigned long)rx_parse_idx, (unsigned long)WifiData->rxbufWrite);
 +
 +    // The oldest entries still held, with what they contain
@@ -285,11 +344,23 @@ index ff705d9..5dca25b 100644
 +    if (rxq_count == 0)
 +        rx_parse_idx = WifiData->rxbufRead;
 +
++    // Watchdog: the oldest entry has been held for a while. If it (or later
++    // ones) wait in a socket mailbox, move them out of the ring.
++    if (rxq_count > 0 && !rxq[rxq_head].done)
++    {
++        u32 now = sys_now();
++        if (now - rxq[rxq_head].t_ms > 200 && now - rx_last_migrate_ms > 200)
++        {
++            rx_last_migrate_ms = now;
++            rxd_migrated += dswifi_rx_migrate_mboxes();
++        }
++    }
++
 +    u32 read_idx = rx_parse_idx;
  
      assert((read_idx & 3) == 0);
  
-@@ -99,6 +216,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -99,6 +230,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
      int cnt = 0;
      while (1)
      {
@@ -302,7 +373,7 @@ index ff705d9..5dca25b 100644
          // Read packet size
          size_t size = read_u32(rxbufData + read_idx);
          if (size == 0)
-@@ -111,10 +234,29 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -111,10 +248,29 @@ TWL_CODE static void Wifi_TWL_Update(void)
              read_idx = 0;
              size = read_u32(rxbufData + read_idx);
              if (size == 0)
@@ -332,7 +403,7 @@ index ff705d9..5dca25b 100644
  #ifdef DSWIFI_ENABLE_LWIP
          if (wifi_lwip_enabled)
          {
-@@ -126,11 +268,27 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -126,11 +282,27 @@ TWL_CODE static void Wifi_TWL_Update(void)
              }
          }
  #endif
