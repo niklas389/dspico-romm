@@ -24,6 +24,7 @@
 #include "log.h"
 #include "net.h"
 #include "prof.h"
+#include "dl.h"
 #include "sdwriter.h"
 
 #define NET_TEST_BYTES (8u * 1024 * 1024)
@@ -476,7 +477,8 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
 // Like run_net_sd, but SD writes run in a background cothread while the main
 // thread waits for the network.
 static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len,
-                             const char *label, bool sample, net_row_t *row)
+                             const char *label, bool sample, bool use_dl,
+                             net_row_t *row)
 {
     log_printf("%s...\n", label);
 
@@ -516,7 +518,9 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     if (sample)
         prof_sampling_start();
     stall_reset();
-    bool ok = net_download_range_async(path, 0, len - 1, w, net_progress, NULL, &r);
+    bool ok = use_dl
+            ? dl_get_range(path, 0, len - 1, w, net_progress, NULL, &r)
+            : net_download_range_async(path, 0, len - 1, w, net_progress, NULL, &r);
     rx_debug_log(label);
     // Count the time to drain the ring: the download isn't done before that.
     uint64_t t0 = prof_ticks();
@@ -545,6 +549,47 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
                (unsigned long)drain_ms);
     if (!row->ok)
         log_printf("  FAILED: %s\n", r.error[0] ? r.error : "write/short/bad status");
+    return r.curl_code != 42;
+}
+
+// The curl-free client (dl.c), body discarded. A new connection, so TLS
+// setup is included like in run_net().
+__attribute__((unused))
+static bool run_dl_net(const char *label, const char *path, uint64_t len,
+                       bool sample, net_row_t *row)
+{
+    log_printf("%s...\n", label);
+    memset(row, 0, sizeof(*row));
+    row->label = label;
+    net_wifi_stats_t st;
+    net_wifi_stats(&st);
+    net_result_t r;
+    prof_reset();
+    if (sample)
+        prof_sampling_start();
+    stall_reset();
+    dl_close();
+    bool ok = dl_get_range(path, 0, len - 1, NULL, net_progress, NULL, &r);
+    rx_debug_log(label);
+    if (sample)
+        save_samples(g_bench_cfg, "prof-" TCP_WND_LABEL "-net.bin");
+    prof_fill(row, r.total_ms);
+    stats_delta(row, &st);
+    printf("\x1b[22;0H                    \n");
+
+    row->ok = ok && r.body_bytes == len && r.status == 206;
+    row->setup_ms = r.ttfb_ms;
+    row->raw_kbps = kbps(r.body_bytes, r.total_ms);
+    uint32_t steady_ms = r.total_ms > r.ttfb_ms ? r.total_ms - r.ttfb_ms : 0;
+    row->steady_kbps = kbps(r.body_bytes, steady_ms);
+    log_file_only("  bytes %llu, total %lu ms, connect %lu, tls %lu, ttfb %lu ms, "
+                  "HTTP %ld, %s %s\n",
+                  (unsigned long long)r.body_bytes, (unsigned long)r.total_ms,
+                  (unsigned long)r.connect_ms, (unsigned long)r.tls_ms,
+                  (unsigned long)r.ttfb_ms, r.status,
+                  r.tls_version ? r.tls_version : "-", r.tls_cipher ? r.tls_cipher : "-");
+    if (!row->ok)
+        log_printf("  FAILED: %s\n", r.error[0] ? r.error : "short/bad status");
     return r.curl_code != 42;
 }
 
@@ -577,29 +622,21 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     g_bench_cfg = cfg;
     net_row_t rows[7];
     int nrows = 0;
-    // v0.12: zero-copy RX stalled once. Run everything in copy mode first,
-    // then the same tests with zero-copy RX, so a stall can't hide results.
+    // libcurl (v0.13 path) vs the curl-free client (dl.c), both with
+    // zero-copy RX (zerocopy= in config.ini).
     bool go = true;
 #ifdef DSPICO_DSWIFI
-    bool zc_cfg = dswifi_rx_zero_copy;
-    dswifi_rx_zero_copy = false;
-    go = run_net("copy net", NULL, path, len, 1, false, &rows[nrows++]);
+    go = run_net("curl net", NULL, path, len, 1, false, &rows[nrows++]);
     if (go)
-        go = run_net_sd_async(cfg, path, len, "copy SD", false, &rows[nrows++]);
-    if (go && zc_cfg)
-    {
-        dswifi_rx_zero_copy = true;
-        go = run_net("zc net", NULL, path, len, 1, true, &rows[nrows++]);
-        if (go)
-            go = run_net_sd_async(cfg, path, len, "zc SD", true, &rows[nrows++]);
-        if (go)
-            go = run_net_sd(cfg, path, len, 256 * 1024, "zc SD256", &rows[nrows++]);
-    }
-    dswifi_rx_zero_copy = zc_cfg;
+        go = run_net_sd_async(cfg, path, len, "curl SD", false, false, &rows[nrows++]);
+    if (go)
+        go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
+    if (go)
+        go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
 #else
     go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
     if (go)
-        go = run_net_sd_async(cfg, path, len, "SD async", true, &rows[nrows++]);
+        go = run_net_sd_async(cfg, path, len, "SD async", true, false, &rows[nrows++]);
 #endif
 
     if (go && cfg->http_url[0])

@@ -21,6 +21,13 @@ sdwriter_t *sdw_open(FILE *fp, size_t ring_size, size_t chunk);
 // Copies data into the ring. Blocks (yields) while the ring is full.
 bool sdw_write(sdwriter_t *w, const void *data, size_t len);
 
+// Zero-copy variant of sdw_write(): returns the contiguous free space at the
+// head of the ring (waits/yields while the ring is full) and its size in
+// *avail. Fill up to *avail bytes, then call sdw_commit() with the count.
+// Returns NULL if a write failed.
+void *sdw_reserve(sdwriter_t *w, size_t *avail);
+void sdw_commit(sdwriter_t *w, size_t n);
+
 // Waits until everything is written, stops the thread, frees the writer.
 // Does not close fp. Returns false if any write failed.
 bool sdw_close(sdwriter_t *w);

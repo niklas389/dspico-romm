@@ -132,6 +132,34 @@ bool sdw_write(sdwriter_t *w, const void *data, size_t len)
     return true;
 }
 
+void *sdw_reserve(sdwriter_t *w, size_t *avail)
+{
+    while (!w->failed)
+    {
+        size_t space = w->size - w->used;
+        if (space == 0)
+        {
+            uint64_t t0 = prof_ticks();
+            cothread_yield_signal(SIG_SPACE);
+            w->stall_ticks += prof_ticks() - t0;
+            continue;
+        }
+        size_t until_end = w->size - w->head;
+        *avail = space < until_end ? space : until_end;
+        return w->ring + w->head;
+    }
+    *avail = 0;
+    return NULL;
+}
+
+void sdw_commit(sdwriter_t *w, size_t n)
+{
+    w->head = (w->head + n) % w->size;
+    w->used += n;
+    if (w->used >= w->chunk)
+        cothread_send_signal(SIG_DATA);
+}
+
 bool sdw_close(sdwriter_t *w)
 {
     w->closing = true;

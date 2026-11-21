@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.14 | ? | ? | OpenSSL ARMv4 ChaCha20/Poly1305 assembly; curl-free download client (`dl.c`) |
 | 0.13 | 912 | 702 | same as 0.12, no stall in this run; copy mode: 843 / 576 |
 | 0.12 | – (stalled) | 699 | zero-copy RX (stalled once, see 0.13), fused MAC/decrypt pass |
 | 0.11 | 805 | 602 | MTU 1500 (553 at MTU 1300 in the same run), cached RX ring reads, ChaCha20 without memcpy |

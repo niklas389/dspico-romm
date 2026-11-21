@@ -24,6 +24,17 @@ static CURL *g_curl;
 static char *g_ca_pem;
 static size_t g_ca_len;
 
+const config_t *net_config(void)
+{
+    return g_cfg;
+}
+
+const char *net_ca_pem(size_t *len)
+{
+    *len = g_ca_len;
+    return g_ca_pem;
+}
+
 uint32_t net_now_ms(void)
 {
     return sys_now();

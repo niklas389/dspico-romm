@@ -41,6 +41,11 @@ typedef bool (*net_progress_fn)(void *ctx, uint64_t now, uint64_t total,
 bool net_init(const config_t *cfg);
 void net_cleanup(void);
 
+// Configuration and CA bundle (NUL-terminated PEM, NULL if none) given to
+// net_init(), for the curl-free download client (dl.h).
+const config_t *net_config(void);
+const char *net_ca_pem(size_t *len);
+
 // Milliseconds since boot (lwIP 1 ms timer, wraps after ~49 days).
 uint32_t net_now_ms(void);
 
