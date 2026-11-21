@@ -206,7 +206,7 @@ index 99c1261..0dd5f07 100644
  {
      err_t ret = ERR_OK;
 diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
-index ff705d9..df305a8 100644
+index ff705d9..6cd1c14 100644
 --- a/source/arm9/wifi_arm9.c
 +++ b/source/arm9/wifi_arm9.c
 @@ -3,6 +3,8 @@
@@ -218,7 +218,7 @@ index ff705d9..df305a8 100644
  #include <dswifi9.h>
  
  #include "arm9/wifi_arm9.h"
-@@ -87,11 +89,140 @@ static void Wifi_NTR_Update(void)
+@@ -87,11 +89,146 @@ static void Wifi_NTR_Update(void)
      }
  }
  
@@ -243,6 +243,7 @@ index ff705d9..df305a8 100644
 +} rxq_entry;
 +
 +static rxq_entry rxq[WIFI_RXQ_SLOTS];
++static u32 rxq_used_bytes(void);
 +static unsigned int rxq_head, rxq_count;
 +static u32 rx_parse_idx;
 +
@@ -345,11 +346,16 @@ index ff705d9..df305a8 100644
 +        rx_parse_idx = WifiData->rxbufRead;
 +
 +    // Watchdog: the oldest entry has been held for a while. If it (or later
-+    // ones) wait in a socket mailbox, move them out of the ring.
++    // ones) wait in a socket mailbox, move them out of the ring. At 800 KB/s
++    // the 128 KiB ring fills in ~160 ms, so act after 20 ms once a quarter of
++    // the ring is in use (data that is being read is released within a few
++    // ms), and after 200 ms in any case.
 +    if (rxq_count > 0 && !rxq[rxq_head].done)
 +    {
 +        u32 now = sys_now();
-+        if (now - rxq[rxq_head].t_ms > 200 && now - rx_last_migrate_ms > 200)
++        u32 age = now - rxq[rxq_head].t_ms;
++        bool pressure = rxq_used_bytes() > WIFI_RXBUFFER_SIZE / 4;
++        if ((age > 200 || (pressure && age > 20)) && now - rx_last_migrate_ms > 20)
 +        {
 +            rx_last_migrate_ms = now;
 +            rxd_migrated += dswifi_rx_migrate_mboxes();
@@ -360,7 +366,7 @@ index ff705d9..df305a8 100644
  
      assert((read_idx & 3) == 0);
  
-@@ -99,6 +230,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -99,6 +236,12 @@ TWL_CODE static void Wifi_TWL_Update(void)
      int cnt = 0;
      while (1)
      {
@@ -373,7 +379,7 @@ index ff705d9..df305a8 100644
          // Read packet size
          size_t size = read_u32(rxbufData + read_idx);
          if (size == 0)
-@@ -111,10 +248,29 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -111,10 +254,29 @@ TWL_CODE static void Wifi_TWL_Update(void)
              read_idx = 0;
              size = read_u32(rxbufData + read_idx);
              if (size == 0)
@@ -403,7 +409,7 @@ index ff705d9..df305a8 100644
  #ifdef DSWIFI_ENABLE_LWIP
          if (wifi_lwip_enabled)
          {
-@@ -126,11 +282,27 @@ TWL_CODE static void Wifi_TWL_Update(void)
+@@ -126,11 +288,27 @@ TWL_CODE static void Wifi_TWL_Update(void)
              }
          }
  #endif
