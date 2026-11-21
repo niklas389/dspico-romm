@@ -61,6 +61,11 @@ sed -i "s/#define DSPICO_TCP_WND_MSS 32/#define DSPICO_TCP_WND_MSS $WND_MSS/" \
     "$SRC/source/arm9/lwip/include/lwipopts.h"
 sed -i "s/#define DSPICO_RXBUF_KB 12/#define DSPICO_RXBUF_KB $RXBUF_KB/" \
     "$SRC/source/common/wifi_shared.h"
+# A7_CMD53=0: ARM7 IRQ path keeps upstream's CMD52 register reads.
+if [ "${A7_CMD53:-1}" = "0" ]; then
+    sed -i "s/#define DSPICO_A7_CMD53 1/#define DSPICO_A7_CMD53 0/" \
+        "$SRC/source/arm7/twl/card.twl.c"
+fi
 # Windows of 64 KiB and more need TCP window scaling (RFC 7323). The socket
 # mailbox must also hold one entry per segment of a full window.
 if [ "$WND_MSS" -gt 44 ]; then

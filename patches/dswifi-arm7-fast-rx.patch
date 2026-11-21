@@ -1,45 +1,45 @@
 diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
-index 0f231ba..48e7ed5 100644
+index 0f231ba..bc92934 100644
 --- a/source/arm7/twl/card.twl.c
 +++ b/source/arm7/twl/card.twl.c
-@@ -187,6 +187,9 @@ static int wifi_card_read_func1_32bit(u32 addr, void* buf, u32 len)
+@@ -37,6 +37,11 @@ enum { A7P_CMD52_N, A7P_CMD52_L, A7P_BLK_N, A7P_BLK_L, A7P_QUEUE_L, A7P_IRQ_N,
+ #define A7P_ADD(i, v) do { if (WifiData) WifiData->arm7_prof[i] += (v); } while (0)
+ #define A7P_LINES(i) A7P_ADD(i, (REG_VCOUNT + 263 - a7p_v0) % 263)
  
-     wlan_ctx.tmio.buffer = buf;
-     wlan_ctx.tmio.size = len;
-+    // dspico-romm: restore afterwards (upstream left it set, which changes
-+    // how every later command waits for completion)
-+    bool old_break_early = wlan_ctx.tmio.break_early;
-     wlan_ctx.tmio.break_early = true;
++// dspico-romm: the receive fast path is only used once the card has
++// completed its start-up (firmware loaded, WMI ready), so initialisation
++// runs exactly as upstream.
++static bool wifi_card_fast_path(void);
++
+ static int wifi_card_wlan_init(void);
  
-     u32 old_blocksize = wlan_ctx.tmio.block_size;
-@@ -196,7 +199,7 @@ static int wifi_card_read_func1_32bit(u32 addr, void* buf, u32 len)
-     wifi_card_send_command_alt(cmd53_read_single,
-             (funcnum << 28) | (1 << 26) | (addr & 0x1FFFF) << 9 | (blkcnt));
- 
--    //wlan_ctx.tmio.break_early = false;
-+    wlan_ctx.tmio.break_early = old_break_early;
- 
-     //wifi_sdio_stop();
- 
-@@ -534,14 +537,9 @@ static void wifi_card_mbox0_sendbytes(const u8 *data, u32 len)
+ #define ID_AR6002 (0x02000271)
+@@ -534,13 +539,18 @@ static void wifi_card_mbox0_sendbytes(const u8 *data, u32 len)
      }
      else
          wifi_card_write_func1_block(send_addr, (void*)data, len);
 -    u32 intval = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
 -    if (intval & 0x00010000) // tx overflow
--    {
++
++    // dspico-romm: upstream reads the 32-bit interrupt status here (4 CMD52,
++    // ~110 us) after every packet, only to log a TX overflow. Skipped once
++    // the card is running.
++    if (!wifi_card_fast_path())
+     {
 -        WLOG_PRINTF("T: mbox full 0x%x 0x%x\n",
 -                    (unsigned int)wifi_card_read_func1_u32(F1_HOST_INT_STATUS),
 -                    (unsigned int)wifi_card_read_func1_u8(F1_RX_LOOKAHEAD_VALID));
 -        WLOG_FLUSH();
--    }
-+
-+    // dspico-romm: upstream read the 32-bit interrupt status here (4 CMD52,
-+    // ~110 us) after every packet, only to log a TX overflow.
++        u32 intval = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
++        if (intval & 0x00010000) // tx overflow
++        {
++            WLOG_PRINTF("T: mbox full 0x%x\n", (unsigned int)intval);
++            WLOG_FLUSH();
++        }
+     }
  
      //wifi_card_bmi_wait_count4();
- }
-@@ -683,6 +681,12 @@ void wmi_send_pkt(u16 wmi_type, u8 ack_type, const void *data, u16 len)
+@@ -683,6 +693,18 @@ void wmi_send_pkt(u16 wmi_type, u8 ack_type, const void *data, u16 len)
  static bool mbox_has_lookahead = false;
  static u32 mbox_lookahead = 0;
  
@@ -49,10 +49,16 @@ index 0f231ba..48e7ed5 100644
 +// means another packet is waiting; otherwise one status read decides.
 +static bool readpkt_irq_mode = false;
 +
++// 1: read status/lookahead registers with 4-byte CMD53 in the IRQ path;
++// 0: keep upstream's CMD52 reads (only the polling and TX read are removed).
++#ifndef DSPICO_A7_CMD53
++#define DSPICO_A7_CMD53 1
++#endif
++
  static u16 wifi_card_mbox0_readbytes(u8 *read_buffer, u32 sz_buf, u32 len_read)
  {
  #ifdef SDIO_NO_BLOCKRW
-@@ -726,18 +730,27 @@ u16 wifi_card_mbox0_readpkt(void)
+@@ -726,18 +748,27 @@ u16 wifi_card_mbox0_readpkt(void)
  {
      //memset(mbox_buffer, 0, MBOX_TMPBUF_SIZE);
  
@@ -89,11 +95,11 @@ index 0f231ba..48e7ed5 100644
  
      u32 header = 0;
  
-@@ -746,6 +759,11 @@ u16 wifi_card_mbox0_readpkt(void)
+@@ -746,6 +777,11 @@ u16 wifi_card_mbox0_readpkt(void)
          header = mbox_lookahead;
          mbox_has_lookahead = false;
      }
-+    else if (readpkt_irq_mode)
++    else if (readpkt_irq_mode && DSPICO_A7_CMD53)
 +    {
 +        // One 4-byte CMD53 instead of four CMD52
 +        header = wifi_card_read_func1_u32_fast(F1_RX_LOOKAHEAD0);
@@ -101,30 +107,55 @@ index 0f231ba..48e7ed5 100644
      else
      {
          header = wifi_card_read_func1_u32(F1_RX_LOOKAHEAD0); // read lookahead
-@@ -1107,11 +1125,20 @@ static int wifi_card_device_init_bmi(void)
+@@ -1105,7 +1141,7 @@ static int wifi_card_device_init_bmi(void)
+     return wifi_card_wlan_init_bmi();
+ }
  
- static void wifi_card_process_pkts(void)
+-static void wifi_card_process_pkts(void)
++static void wifi_card_process_pkts_upstream(void)
  {
--    // Ack the interrupts
--    u32 int_sts = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
--    wifi_card_write_func1_u32(F1_HOST_INT_STATUS, int_sts);
+     // Ack the interrupts
+     u32 int_sts = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
+@@ -1114,6 +1150,31 @@ static void wifi_card_process_pkts(void)
+     while (wifi_card_mbox0_readpkt());
+ }
+ 
++static void wifi_card_process_pkts(void)
++{
++    if (!wifi_card_fast_path())
++    {
++        wifi_card_process_pkts_upstream();
++        return;
++    }
++
 +    // dspico-romm: read the four status bytes with one CMD53 and write back
 +    // only the non-zero ones (same values and order as upstream's 32-bit
 +    // write, which always cost four CMD52).
-+    u32 int_sts = wifi_card_read_func1_u32_fast(F1_HOST_INT_STATUS);
++    u32 int_sts = DSPICO_A7_CMD53 ? wifi_card_read_func1_u32_fast(F1_HOST_INT_STATUS)
++                                  : wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
 +    for (int b = 3; b >= 0; b--)
 +    {
 +        u8 v = (int_sts >> (8 * b)) & 0xFF;
 +        if (v)
 +            wifi_card_write_func1_u8(F1_HOST_INT_STATUS + b, v);
 +    }
- 
++
 +    readpkt_irq_mode = true;
-     while (wifi_card_mbox0_readpkt());
++    while (wifi_card_mbox0_readpkt());
 +    readpkt_irq_mode = false;
- }
- 
++}
++
  static void wifi_card_irq(void)
+ {
+     u32 v0 = REG_VCOUNT;
+@@ -1599,3 +1660,7 @@ void ath6k_bmi_lz_upload(u32 addr, const u8* data, u32 len) __attribute__((__ali
+ int ath6k_init_hw_to_bmi(void) __attribute__((__alias__("wifi_card_init_bmi")));
+ void ath6k_deinit_hw(void) __attribute__((__alias__("wifi_card_deinit")));
+ 
++static bool wifi_card_fast_path(void)
++{
++    return wifi_card_initted();
++}
 diff --git a/source/arm7/twl/rx_queue.twl.c b/source/arm7/twl/rx_queue.twl.c
 index 12b92d7..e449109 100644
 --- a/source/arm7/twl/rx_queue.twl.c
