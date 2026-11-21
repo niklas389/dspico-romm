@@ -29,6 +29,64 @@
 #define CRYPTO_ROUNDS  8
 #define SD_TEST_BYTES  (4u * 1024 * 1024)
 
+// ---------------------------------------------------------------------------
+// ARM9 idle meter: a cothread that only gets CPU time when every other thread
+// waits (for an interrupt, the network, ...). Its loop count during a test,
+// compared with the count when the system is idle, gives the idle share.
+// ---------------------------------------------------------------------------
+
+static volatile uint32_t g_idle_count;
+static volatile bool g_idle_on;
+static uint32_t g_idle_per_sec; // Calibrated loop count per second when idle
+
+static int idle_thread(void *arg)
+{
+    (void)arg;
+    while (1)
+    {
+        if (g_idle_on)
+            g_idle_count++;
+        cothread_yield();
+    }
+    return 0;
+}
+
+static void idle_start(void)
+{
+    g_idle_count = 0;
+    g_idle_on = true;
+}
+
+// Returns the idle share in percent since idle_start().
+static uint32_t idle_stop(uint32_t elapsed_ms)
+{
+    g_idle_on = false;
+    if (!g_idle_per_sec || !elapsed_ms)
+        return 0;
+    uint64_t expected = (uint64_t)g_idle_per_sec * elapsed_ms / 1000;
+    uint32_t pct = (uint32_t)((uint64_t)g_idle_count * 100 / (expected ? expected : 1));
+    return pct > 100 ? 100 : pct;
+}
+
+static void idle_init(void)
+{
+    static bool started;
+    if (!started)
+    {
+        cothread_create(idle_thread, NULL, 1024, COTHREAD_DETACHED);
+        started = true;
+    }
+    // Calibrate: the main thread only waits for VBlank for one second.
+    idle_start();
+    uint32_t t0 = net_now_ms();
+    for (int i = 0; i < 60; i++)
+        cothread_yield_irq(IRQ_VBLANK);
+    uint32_t dt = net_now_ms() - t0;
+    g_idle_on = false;
+    g_idle_per_sec = dt ? (uint32_t)((uint64_t)g_idle_count * 1000 / dt) : 0;
+    log_file_only("Idle meter: %lu loops/s\n", (unsigned long)g_idle_per_sec);
+}
+
 static uint32_t kbps(uint64_t bytes, uint32_t ms)
 {
     return ms ? (uint32_t)((bytes * 1000 / 1024) / ms) : 0;
@@ -266,6 +324,7 @@ typedef struct
     uint32_t setup_ms;
     uint32_t rx_queued;    // ARM7 -> ARM9 packets during the test
     uint32_t rx_lost;      // ... dropped because the ring buffer was full
+    uint32_t idle_pct;     // ARM9 idle share during the transfer
     bool ok;
 } net_row_t;
 
@@ -287,7 +346,9 @@ static bool run_net(const char *label, const char *base, const char *path,
     net_wifi_stats_t st;
     net_wifi_stats(&st);
     net_par_result_t r;
+    idle_start();
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
+    row->idle_pct = idle_stop(r.total_ms);
     stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
 
@@ -310,9 +371,8 @@ static bool run_net(const char *label, const char *base, const char *path,
 // Single keep-alive connection, body written to the SD card like a real
 // download. Shows how much SD writes slow down reception.
 static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
-                       net_row_t *row)
+                       size_t buf_size, const char *label, net_row_t *row)
 {
-    const char *label = "HTTPS->SD";
     log_printf("%s...\n", label);
 
     char dir[CFG_PATH_MAX + 16], file[CFG_PATH_MAX + 48];
@@ -330,14 +390,16 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
         return true;
     }
     // Same strategy as the real app will use: reserve the file, big buffer.
-    setvbuf(f, NULL, _IOFBF, 256 * 1024);
+    setvbuf(f, NULL, _IOFBF, buf_size);
     if (!sd_preallocate(f, len))
         log_printf("  preallocation failed\n");
 
     net_wifi_stats_t st;
     net_wifi_stats(&st);
     net_result_t r;
+    idle_start();
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
+    row->idle_pct = idle_stop(r.total_ms);
     fclose(f);
     stats_delta(row, &st);
     remove(file);
@@ -380,16 +442,21 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
 
-    net_row_t rows[5];
+    idle_init();
+
+    net_row_t rows[6];
     int nrows = 0;
-    const char *labels[3] = { "HTTPS x1", "HTTPS x2", "HTTPS x4" };
-    const int conns[3] = { 1, 2, 4 };
+    // Parallel connections were shown to be slower; keep 1 and 2 only.
+    const char *labels[2] = { "HTTPS x1", "HTTPS x2" };
+    const int conns[2] = { 1, 2 };
     bool go = true;
-    for (int i = 0; i < 3 && go; i++)
+    for (int i = 0; i < 2 && go; i++)
         go = run_net(labels[i], NULL, path, len, conns[i], &rows[nrows++]);
 
     if (go)
-        go = run_net_sd(cfg, path, len, &rows[nrows++]);
+        go = run_net_sd(cfg, path, len, 32 * 1024, "SD 32K", &rows[nrows++]);
+    if (go)
+        go = run_net_sd(cfg, path, len, 256 * 1024, "SD 256K", &rows[nrows++]);
 
     if (go && cfg->http_url[0])
         go = run_net("HTTP  x1", cfg->http_url, path, len, 1, &rows[nrows++]);
@@ -403,14 +470,15 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
     log_printf("SD write     %lu KB/s (best)\n", (unsigned long)sd);
     log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
-    log_printf("test      raw stdy setup lost\n");
+    log_printf("test     raw stdy setup lost idle\n");
     for (int i = 0; i < nrows; i++)
-        log_printf("%-9s%4lu %4lu %4lu %4lu%s\n", rows[i].label,
+        log_printf("%-8s%4lu %4lu %4lu %4lu %3lu%%%s\n", rows[i].label,
                    (unsigned long)rows[i].raw_kbps,
                    (unsigned long)rows[i].steady_kbps,
                    (unsigned long)rows[i].setup_ms,
-                   (unsigned long)rows[i].rx_lost, rows[i].ok ? "" : " F");
-    log_printf("(KB/s, ms; lost = dropped pkts)\n");
+                   (unsigned long)rows[i].rx_lost,
+                   (unsigned long)rows[i].idle_pct, rows[i].ok ? "" : " F");
+    log_printf("(KB/s, ms, packets, ARM9 idle)\n");
     for (int i = 0; i < nrows; i++)
         log_file_only("  %s: rx_queued %lu, rx_lost %lu\n", rows[i].label,
                       (unsigned long)rows[i].rx_queued,
