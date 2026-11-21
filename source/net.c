@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <curl/curl.h>
 #include <mbedtls/error.h>
@@ -199,8 +200,14 @@ static int debug_cb(CURL *h, curl_infotype type, char *data, size_t size,
     }
     else if (type == CURLINFO_HEADER_IN)
     {
-        log_file_only("< ");
-        log_file_write(data, size);
+        // curl delivers incoming headers one line at a time.
+        if (size >= 11 && strncasecmp(data, "set-cookie:", 11) == 0)
+            log_file_only("< Set-Cookie: <redacted>\r\n");
+        else
+        {
+            log_file_only("< ");
+            log_file_write(data, size);
+        }
     }
     else if (type == CURLINFO_HEADER_OUT)
     {
