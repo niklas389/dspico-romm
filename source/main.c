@@ -21,6 +21,7 @@
 #include <fat.h>
 #include <nds.h>
 
+#include "bench.h"
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
@@ -569,13 +570,19 @@ static void browse_platform(int platform_id, const char *platform_name)
         cJSON_Delete(root);
 
         consoleClear();
-        printf("%s\n\nA: download to SD\nX: download, discard (net only)\nB: back\n",
+        printf("%s\n\nA: download to SD\nX: download, discard (net only)\n"
+               "Y: speed test suite\nB: back\n",
                label_buf[sel]);
         u16 k = wait_key();
         if (k & KEY_A)
             download_test(rom_id, fs_name_copy, size, true);
         else if (k & KEY_X)
             download_test(rom_id, fs_name_copy, size, false);
+        else if (k & KEY_Y)
+        {
+            bench_run_suite(&g_cfg, rom_id, fs_name_copy, size);
+            press_any_key();
+        }
     }
 }
 

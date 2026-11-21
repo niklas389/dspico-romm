@@ -1,0 +1,25 @@
+diff --git a/source/arm9/lwip/include/lwipopts.h b/source/arm9/lwip/include/lwipopts.h
+index a2c4f7e..1ab2c35 100644
+--- a/source/arm9/lwip/include/lwipopts.h
++++ b/source/arm9/lwip/include/lwipopts.h
+@@ -110,7 +110,10 @@
+ 
+ #define LWIP_RAW                    1
+ 
+-#define TCP_WND                     (4 * TCP_MSS)
++#ifndef DSPICO_TCP_WND_MSS
++#define DSPICO_TCP_WND_MSS 32
++#endif
++#define TCP_WND                     (DSPICO_TCP_WND_MSS * TCP_MSS)
+ #define TCP_MSS                     1460
+ #define TCP_SND_BUF                 (8 * TCP_MSS)
+ #define TCP_LISTEN_BACKLOG          1
+@@ -160,7 +163,7 @@
+ #define TCPIP_MBOX_SIZE             10
+ #define DEFAULT_RAW_RECVMBOX_SIZE   10
+ #define DEFAULT_UDP_RECVMBOX_SIZE   10
+-#define DEFAULT_TCP_RECVMBOX_SIZE   10
++#define DEFAULT_TCP_RECVMBOX_SIZE   64
+ #define DEFAULT_ACCEPTMBOX_SIZE     10
+ 
+ // Disable statistics

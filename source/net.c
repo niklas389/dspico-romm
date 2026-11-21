@@ -176,12 +176,14 @@ char *net_escape(const char *s)
 
 typedef struct
 {
+    CURL *h;
     buf_t *mem;
     FILE *fp;
     net_progress_fn cb;
     void *cb_ctx;
     uint32_t start_ms;
     uint64_t body_bytes;
+    uint32_t first_byte_ms; // Absolute net_now_ms() of the first body byte
     bool write_failed;
     net_result_t *res;
 } xfer_t;
@@ -237,7 +239,7 @@ static void capture_tls_info(xfer_t *x)
         return;
 
     struct curl_tlssessioninfo *info = NULL;
-    if (curl_easy_getinfo(g_curl, CURLINFO_TLS_SSL_PTR, &info) != CURLE_OK || !info)
+    if (curl_easy_getinfo(x->h, CURLINFO_TLS_SSL_PTR, &info) != CURLE_OK || !info)
         return;
     if (info->backend != CURLSSLBACKEND_MBEDTLS || !info->internals)
         return;
@@ -253,6 +255,8 @@ static size_t write_cb(char *data, size_t size, size_t nmemb, void *userp)
     size_t len = size * nmemb;
 
     capture_tls_info(x);
+    if (x->first_byte_ms == 0)
+        x->first_byte_ms = net_now_ms() | 1; // Never 0 once set
     x->body_bytes += len;
 
     if (x->mem)
@@ -292,8 +296,93 @@ static int xferinfo_cb(void *userp, curl_off_t dltotal, curl_off_t dlnow,
     return keep_going ? 0 : 1;
 }
 
+// Applies the options shared by every request to handle h. Returns the header
+// list, which the caller frees after the transfer.
+static struct curl_slist *setup_handle(CURL *h, const char *url, bool auth,
+                                       bool compressed, const char *post_json,
+                                       char *errbuf, xfer_t *x)
+{
+    x->h = h;
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "dspico-romm/" POC_VERSION);
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 30L);
+    curl_easy_setopt(h, CURLOPT_BUFFERSIZE, 64L * 1024);
+    curl_easy_setopt(h, CURLOPT_ERRORBUFFER, errbuf);
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(h, CURLOPT_MAXREDIRS, 3L);
+
+    if (g_ca_pem)
+    {
+        struct curl_blob blob = {
+            .data = g_ca_pem,
+            .len = g_ca_len,
+            .flags = CURL_BLOB_NOCOPY,
+        };
+        curl_easy_setopt(h, CURLOPT_CAINFO_BLOB, &blob);
+    }
+
+    if (g_cfg->insecure)
+    {
+        curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);
+    }
+
+    // gzip for JSON only; ROM bodies are already dense and inflating costs CPU.
+    if (compressed)
+        curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
+
+    if (g_cfg->verbose)
+    {
+        curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(h, CURLOPT_DEBUGFUNCTION, debug_cb);
+    }
+
+    struct curl_slist *headers = NULL;
+    if (auth && g_cfg->token[0])
+    {
+        char auth_header[CFG_TOKEN_MAX + 32];
+        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s",
+                 g_cfg->token);
+        headers = curl_slist_append(headers, auth_header); // curl copies it
+    }
+    if (post_json)
+    {
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        curl_easy_setopt(h, CURLOPT_POSTFIELDS, post_json);
+    }
+    headers = curl_slist_append(headers, "Accept: application/json, */*");
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, x);
+    curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
+    curl_easy_setopt(h, CURLOPT_XFERINFODATA, x);
+    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+
+    return headers;
+}
+
+static void collect_info(CURL *h, net_result_t *res)
+{
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &res->status);
+
+    curl_off_t t;
+    if (curl_easy_getinfo(h, CURLINFO_CONNECT_TIME_T, &t) == CURLE_OK)
+        res->connect_ms = (uint32_t)(t / 1000);
+    if (curl_easy_getinfo(h, CURLINFO_APPCONNECT_TIME_T, &t) == CURLE_OK)
+        res->tls_ms = (uint32_t)(t / 1000);
+    if (curl_easy_getinfo(h, CURLINFO_STARTTRANSFER_TIME_T, &t) == CURLE_OK)
+        res->ttfb_ms = (uint32_t)(t / 1000);
+    if (curl_easy_getinfo(h, CURLINFO_SIZE_DOWNLOAD_T, &t) == CURLE_OK)
+        res->wire_bytes = (uint64_t)t;
+}
+
 static bool perform(const char *path, const char *post_json, bool auth,
-                    bool compressed, xfer_t *x)
+                    bool compressed, const char *range, xfer_t *x)
 {
     net_result_t *res = x->res;
     memset(res, 0, sizeof(*res));
@@ -309,66 +398,10 @@ static bool perform(const char *path, const char *post_json, bool auth,
 
     // curl_easy_reset keeps the connection cache, so keep-alive still works.
     curl_easy_reset(g_curl);
-
-    curl_easy_setopt(g_curl, CURLOPT_URL, url);
-    curl_easy_setopt(g_curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-    curl_easy_setopt(g_curl, CURLOPT_USERAGENT, "dspico-romm/" POC_VERSION);
-    curl_easy_setopt(g_curl, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(g_curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(g_curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(g_curl, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(g_curl, CURLOPT_BUFFERSIZE, 32L * 1024);
-    curl_easy_setopt(g_curl, CURLOPT_ERRORBUFFER, res->error);
-    curl_easy_setopt(g_curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(g_curl, CURLOPT_MAXREDIRS, 3L);
-
-    if (g_ca_pem)
-    {
-        struct curl_blob blob = {
-            .data = g_ca_pem,
-            .len = g_ca_len,
-            .flags = CURL_BLOB_NOCOPY,
-        };
-        curl_easy_setopt(g_curl, CURLOPT_CAINFO_BLOB, &blob);
-    }
-
-    if (g_cfg->insecure)
-    {
-        curl_easy_setopt(g_curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(g_curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    }
-
-    // gzip for JSON only; ROM bodies are already dense and inflating costs CPU.
-    if (compressed)
-        curl_easy_setopt(g_curl, CURLOPT_ACCEPT_ENCODING, "");
-
-    if (g_cfg->verbose)
-    {
-        curl_easy_setopt(g_curl, CURLOPT_VERBOSE, 1L);
-        curl_easy_setopt(g_curl, CURLOPT_DEBUGFUNCTION, debug_cb);
-    }
-
-    struct curl_slist *headers = NULL;
-    char auth_header[CFG_TOKEN_MAX + 32];
-    if (auth && g_cfg->token[0])
-    {
-        snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s",
-                 g_cfg->token);
-        headers = curl_slist_append(headers, auth_header);
-    }
-    if (post_json)
-    {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
-        curl_easy_setopt(g_curl, CURLOPT_POSTFIELDS, post_json);
-    }
-    headers = curl_slist_append(headers, "Accept: application/json, */*");
-    curl_easy_setopt(g_curl, CURLOPT_HTTPHEADER, headers);
-
-    curl_easy_setopt(g_curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(g_curl, CURLOPT_WRITEDATA, x);
-    curl_easy_setopt(g_curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
-    curl_easy_setopt(g_curl, CURLOPT_XFERINFODATA, x);
-    curl_easy_setopt(g_curl, CURLOPT_NOPROGRESS, 0L);
+    struct curl_slist *headers = setup_handle(g_curl, url, auth, compressed,
+                                              post_json, res->error, x);
+    if (range)
+        curl_easy_setopt(g_curl, CURLOPT_RANGE, range);
 
     x->start_ms = net_now_ms();
     CURLcode rc = curl_easy_perform(g_curl);
@@ -377,17 +410,7 @@ static bool perform(const char *path, const char *post_json, bool auth,
     curl_slist_free_all(headers);
 
     res->curl_code = rc;
-    curl_easy_getinfo(g_curl, CURLINFO_RESPONSE_CODE, &res->status);
-
-    curl_off_t t;
-    if (curl_easy_getinfo(g_curl, CURLINFO_CONNECT_TIME_T, &t) == CURLE_OK)
-        res->connect_ms = (uint32_t)(t / 1000);
-    if (curl_easy_getinfo(g_curl, CURLINFO_APPCONNECT_TIME_T, &t) == CURLE_OK)
-        res->tls_ms = (uint32_t)(t / 1000);
-    if (curl_easy_getinfo(g_curl, CURLINFO_STARTTRANSFER_TIME_T, &t) == CURLE_OK)
-        res->ttfb_ms = (uint32_t)(t / 1000);
-    if (curl_easy_getinfo(g_curl, CURLINFO_SIZE_DOWNLOAD_T, &t) == CURLE_OK)
-        res->wire_bytes = (uint64_t)t;
+    collect_info(g_curl, res);
     res->body_bytes = x->body_bytes;
 
     if (rc != CURLE_OK && res->error[0] == '\0')
@@ -401,21 +424,21 @@ static bool perform(const char *path, const char *post_json, bool auth,
 bool net_get(const char *path, bool auth, buf_t *out, net_result_t *res)
 {
     xfer_t x = { .mem = out, .res = res };
-    return perform(path, NULL, auth, true, &x);
+    return perform(path, NULL, auth, true, NULL, &x);
 }
 
 bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
                    net_result_t *res)
 {
     xfer_t x = { .mem = out, .res = res };
-    return perform(path, json, auth, true, &x);
+    return perform(path, json, auth, true, NULL, &x);
 }
 
 bool net_download(const char *path, FILE *fp, net_progress_fn cb, void *ctx,
                   net_result_t *res)
 {
     xfer_t x = { .fp = fp, .cb = cb, .cb_ctx = ctx, .res = res };
-    return perform(path, NULL, true, false, &x);
+    return perform(path, NULL, true, false, NULL, &x);
 }
 
 void net_log_result(const char *label, const net_result_t *res)
@@ -431,4 +454,134 @@ void net_log_result(const char *label, const net_result_t *res)
                    res->tls_cipher ? res->tls_cipher : "?");
     if (res->curl_code != 0)
         log_printf("  error %d: %s\n", res->curl_code, res->error);
+}
+
+// ---------------------------------------------------------------------------
+// Parallel ranged download (speed test)
+// ---------------------------------------------------------------------------
+
+#define PAR_MAX_CONNS 8
+
+bool net_download_parallel(const char *base_url, const char *path,
+                           uint64_t length, int conns, net_progress_fn cb,
+                           void *ctx, net_par_result_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->conns = conns;
+
+    if (conns < 1 || conns > PAR_MAX_CONNS || length < (uint64_t)conns)
+    {
+        snprintf(out->error, sizeof(out->error), "bad parameters");
+        return false;
+    }
+
+    char url[CFG_URL_MAX + 512];
+    snprintf(url, sizeof(url), "%s%s", base_url ? base_url : g_cfg->url, path);
+
+    CURLM *multi = curl_multi_init();
+    CURL *h[PAR_MAX_CONNS] = { 0 };
+    xfer_t x[PAR_MAX_CONNS];
+    net_result_t r[PAR_MAX_CONNS];
+    struct curl_slist *hdr[PAR_MAX_CONNS] = { 0 };
+
+    uint64_t chunk = length / conns;
+    for (int i = 0; i < conns; i++)
+    {
+        memset(&x[i], 0, sizeof(x[i]));
+        memset(&r[i], 0, sizeof(r[i]));
+        x[i].res = &r[i];
+
+        h[i] = curl_easy_init();
+        hdr[i] = setup_handle(h[i], url, true, false, NULL, r[i].error, &x[i]);
+        // Each handle gets its own connection; no progress callback per handle.
+        curl_easy_setopt(h[i], CURLOPT_NOPROGRESS, 1L);
+
+        uint64_t first = chunk * i;
+        uint64_t last = (i == conns - 1) ? length - 1 : first + chunk - 1;
+        char range[48];
+        snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)first,
+                 (unsigned long long)last);
+        curl_easy_setopt(h[i], CURLOPT_RANGE, range); // curl copies the string
+
+        curl_multi_add_handle(multi, h[i]);
+    }
+
+    uint32_t start = net_now_ms();
+    for (int i = 0; i < conns; i++)
+        x[i].start_ms = start;
+
+    uint32_t last_ui = start;
+    int running = 1;
+    bool aborted = false;
+    while (running)
+    {
+        CURLMcode mc = curl_multi_perform(multi, &running);
+        if (mc != CURLM_OK)
+        {
+            snprintf(out->error, sizeof(out->error), "multi: %s",
+                     curl_multi_strerror(mc));
+            break;
+        }
+        if (running)
+            curl_multi_poll(multi, NULL, 0, 50, NULL);
+
+        uint32_t now = net_now_ms();
+        if (cb && now - last_ui >= 500)
+        {
+            last_ui = now;
+            uint64_t sum = 0;
+            for (int i = 0; i < conns; i++)
+                sum += x[i].body_bytes;
+            if (!cb(ctx, sum, length, now - start))
+            {
+                aborted = true;
+                snprintf(out->error, sizeof(out->error), "cancelled");
+                break;
+            }
+        }
+    }
+    out->total_ms = net_now_ms() - start;
+
+    int done_ok = 0;
+    CURLMsg *msg;
+    int queued;
+    while ((msg = curl_multi_info_read(multi, &queued)))
+    {
+        if (msg->msg != CURLMSG_DONE)
+            continue;
+        if (msg->data.result == CURLE_OK)
+            done_ok++;
+        else if (out->error[0] == '\0')
+            snprintf(out->error, sizeof(out->error), "%s",
+                     curl_easy_strerror(msg->data.result));
+    }
+
+    for (int i = 0; i < conns; i++)
+    {
+        long status = 0;
+        curl_easy_getinfo(h[i], CURLINFO_RESPONSE_CODE, &status);
+        if (status != 206 && out->error[0] == '\0')
+            snprintf(out->error, sizeof(out->error), "HTTP %ld (want 206)", status);
+        if (i == 0)
+            out->status = status;
+
+        out->bytes += x[i].body_bytes;
+        if (x[i].first_byte_ms)
+        {
+            uint32_t setup = x[i].first_byte_ms - start;
+            if (setup > out->setup_ms)
+                out->setup_ms = setup;
+        }
+        if (!out->tls_cipher && r[i].tls_cipher)
+            out->tls_cipher = r[i].tls_cipher;
+
+        curl_multi_remove_handle(multi, h[i]);
+        curl_easy_cleanup(h[i]);
+        curl_slist_free_all(hdr[i]);
+    }
+    curl_multi_cleanup(multi);
+
+    out->ok = !aborted && done_ok == conns && out->bytes == length &&
+              out->error[0] == '\0';
+    return out->ok;
 }

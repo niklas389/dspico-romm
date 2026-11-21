@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: MIT
+//
+// Speed-test suite. Separates the possible bottlenecks of a download:
+//   - round-trip time (bounds a single TCP connection to window / RTT)
+//   - CPU cost of TLS record decryption (ChaCha20-Poly1305 / AES-128-GCM)
+//   - SD card write speed
+//   - network throughput with 1, 2 and 4 parallel connections
+//   - optionally plain HTTP (http_url= in config.ini) to see the TLS cost
+
+#include "bench.h"
+
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <mbedtls/chachapoly.h>
+#include <mbedtls/gcm.h>
+#include <nds.h>
+
+#include "log.h"
+#include "net.h"
+
+#define NET_TEST_BYTES (8u * 1024 * 1024)
+#define CRYPTO_BYTES   (256u * 1024)
+#define CRYPTO_ROUNDS  8
+#define SD_TEST_BYTES  (4u * 1024 * 1024)
+
+static uint32_t kbps(uint64_t bytes, uint32_t ms)
+{
+    return ms ? (uint32_t)((bytes * 1000 / 1024) / ms) : 0;
+}
+
+static bool cancel_pressed(void)
+{
+    scanKeys();
+    return keysDown() & KEY_B;
+}
+
+// ---------------------------------------------------------------------------
+// RTT via TCP connect time
+// ---------------------------------------------------------------------------
+
+static void parse_host_port(const char *url, char *host, size_t hlen, char *port,
+                            size_t plen)
+{
+    const char *p = strstr(url, "://");
+    bool https = strncmp(url, "https", 5) == 0;
+    p = p ? p + 3 : url;
+
+    size_t i = 0;
+    while (*p && *p != ':' && *p != '/' && i + 1 < hlen)
+        host[i++] = *p++;
+    host[i] = '\0';
+
+    if (*p == ':')
+    {
+        p++;
+        i = 0;
+        while (*p && *p != '/' && i + 1 < plen)
+            port[i++] = *p++;
+        port[i] = '\0';
+    }
+    else
+    {
+        snprintf(port, plen, "%s", https ? "443" : "80");
+    }
+}
+
+static void bench_rtt(const config_t *cfg, uint32_t *best, uint32_t *median)
+{
+    char host[128], port[8];
+    parse_host_port(cfg->url, host, sizeof(host), port, sizeof(port));
+
+    struct addrinfo hints = { 0 };
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *ai = NULL;
+
+    *best = *median = 0;
+    if (getaddrinfo(host, port, &hints, &ai) != 0 || !ai)
+    {
+        log_printf("RTT: DNS failed\n");
+        return;
+    }
+
+    uint32_t samples[7];
+    int n = 0;
+    for (int i = 0; i < 7; i++)
+    {
+        int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s < 0)
+            continue;
+        uint32_t t0 = net_now_ms();
+        int rc = connect(s, ai->ai_addr, ai->ai_addrlen);
+        uint32_t dt = net_now_ms() - t0;
+        close(s);
+        if (rc == 0)
+            samples[n++] = dt;
+    }
+    freeaddrinfo(ai);
+
+    if (n == 0)
+    {
+        log_printf("RTT: connect failed\n");
+        return;
+    }
+
+    // Insertion sort, n <= 7
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && samples[j] < samples[j - 1]; j--)
+        {
+            uint32_t t = samples[j];
+            samples[j] = samples[j - 1];
+            samples[j - 1] = t;
+        }
+
+    *best = samples[0];
+    *median = samples[n / 2];
+    log_printf("RTT (TCP connect x%d): min %lu, med %lu ms\n", n,
+               (unsigned long)*best, (unsigned long)*median);
+}
+
+// ---------------------------------------------------------------------------
+// Crypto
+// ---------------------------------------------------------------------------
+
+static void bench_crypto(uint32_t *chacha_kbps, uint32_t *gcm_kbps)
+{
+    *chacha_kbps = *gcm_kbps = 0;
+
+    unsigned char *in = malloc(CRYPTO_BYTES);
+    unsigned char *out = malloc(CRYPTO_BYTES);
+    if (!in || !out)
+    {
+        log_printf("crypto: out of memory\n");
+        free(in);
+        free(out);
+        return;
+    }
+    memset(in, 0xA5, CRYPTO_BYTES);
+
+    unsigned char key[32] = { 1 }, nonce[12] = { 2 }, tag[16];
+
+    mbedtls_chachapoly_context cp;
+    mbedtls_chachapoly_init(&cp);
+    mbedtls_chachapoly_setkey(&cp, key);
+    uint32_t t0 = net_now_ms();
+    for (int i = 0; i < CRYPTO_ROUNDS; i++)
+        mbedtls_chachapoly_encrypt_and_tag(&cp, CRYPTO_BYTES, nonce, NULL, 0, in,
+                                           out, tag);
+    uint32_t dt = net_now_ms() - t0;
+    mbedtls_chachapoly_free(&cp);
+    *chacha_kbps = kbps((uint64_t)CRYPTO_BYTES * CRYPTO_ROUNDS, dt);
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 128);
+    t0 = net_now_ms();
+    for (int i = 0; i < CRYPTO_ROUNDS; i++)
+        mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, CRYPTO_BYTES, nonce,
+                                  sizeof(nonce), NULL, 0, in, out, sizeof(tag), tag);
+    dt = net_now_ms() - t0;
+    mbedtls_gcm_free(&gcm);
+    *gcm_kbps = kbps((uint64_t)CRYPTO_BYTES * CRYPTO_ROUNDS, dt);
+
+    free(in);
+    free(out);
+
+    log_printf("CPU ChaCha20-Poly1305: %lu KB/s\n", (unsigned long)*chacha_kbps);
+    log_printf("CPU AES-128-GCM:       %lu KB/s\n", (unsigned long)*gcm_kbps);
+}
+
+// ---------------------------------------------------------------------------
+// SD write
+// ---------------------------------------------------------------------------
+
+static uint32_t bench_sd(const config_t *cfg)
+{
+    char dir[CFG_PATH_MAX + 16], path[CFG_PATH_MAX + 48];
+    config_path(cfg, "test", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    snprintf(path, sizeof(path), "%s/sdbench.bin", dir);
+
+    const size_t block = 64 * 1024;
+    unsigned char *buf = malloc(block);
+    FILE *f = fopen(path, "wb");
+    if (!buf || !f)
+    {
+        log_printf("SD bench: can't open file\n");
+        free(buf);
+        if (f)
+            fclose(f);
+        return 0;
+    }
+    memset(buf, 0x5A, block);
+    setvbuf(f, NULL, _IOFBF, 64 * 1024);
+
+    uint32_t t0 = net_now_ms();
+    size_t written = 0;
+    while (written < SD_TEST_BYTES)
+    {
+        if (fwrite(buf, 1, block, f) != block)
+            break;
+        written += block;
+    }
+    fclose(f);
+    uint32_t dt = net_now_ms() - t0;
+
+    free(buf);
+    remove(path);
+
+    uint32_t r = kbps(written, dt);
+    log_printf("SD write (64K blocks): %lu KB/s\n", (unsigned long)r);
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Network
+// ---------------------------------------------------------------------------
+
+static bool net_progress(void *ctx, uint64_t now, uint64_t total, uint32_t ms)
+{
+    (void)ctx;
+    printf("\x1b[22;0H%3lu%%  %4lu KB/s   ",
+           total ? (unsigned long)(now * 100 / total) : 0,
+           (unsigned long)kbps(now, ms));
+    return !cancel_pressed();
+}
+
+typedef struct
+{
+    const char *label;
+    uint32_t raw_kbps;     // bytes / wall time
+    uint32_t steady_kbps;  // bytes / (wall time - setup)
+    uint32_t setup_ms;
+    bool ok;
+} net_row_t;
+
+static bool run_net(const char *label, const char *base, const char *path,
+                    uint64_t len, int conns, net_row_t *row)
+{
+    log_printf("%s...\n", label);
+    net_par_result_t r;
+    net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
+    printf("\x1b[22;0H                    \n");
+
+    row->label = label;
+    row->ok = r.ok;
+    row->setup_ms = r.setup_ms;
+    row->raw_kbps = kbps(r.bytes, r.total_ms);
+    uint32_t steady_ms = r.total_ms > r.setup_ms ? r.total_ms - r.setup_ms : 0;
+    row->steady_kbps = kbps(r.bytes, steady_ms);
+
+    log_file_only("  bytes %llu, total %lu ms, setup %lu ms, HTTP %ld, %s\n",
+                  (unsigned long long)r.bytes, (unsigned long)r.total_ms,
+                  (unsigned long)r.setup_ms, r.status,
+                  r.tls_cipher ? r.tls_cipher : "plain/none");
+    if (!r.ok)
+        log_printf("  FAILED: %s\n", r.error);
+    return strcmp(r.error, "cancelled") != 0;
+}
+
+void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
+                     uint64_t rom_size)
+{
+    consoleClear();
+    log_printf("=== Speed test (TCP_WND %s) ===\n", TCP_WND_LABEL);
+    log_printf("ROM: %.30s\nB: cancel\n", fs_name);
+
+    uint64_t len = rom_size < NET_TEST_BYTES ? rom_size : NET_TEST_BYTES;
+    if (len < 1024 * 1024)
+    {
+        log_printf("Pick a ROM of at least 1 MB.\n");
+        return;
+    }
+
+    char *escaped = net_escape(fs_name);
+    if (!escaped)
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "/api/roms/%d/content/%s", rom_id, escaped);
+    free(escaped);
+
+    uint32_t rtt_min, rtt_med, chacha, gcm, sd;
+    bench_rtt(cfg, &rtt_min, &rtt_med);
+    bench_crypto(&chacha, &gcm);
+    sd = bench_sd(cfg);
+
+    net_row_t rows[4];
+    int nrows = 0;
+    const char *labels[3] = { "HTTPS x1", "HTTPS x2", "HTTPS x4" };
+    const int conns[3] = { 1, 2, 4 };
+    bool go = true;
+    for (int i = 0; i < 3 && go; i++)
+        go = run_net(labels[i], NULL, path, len, conns[i], &rows[nrows++]);
+
+    if (go && cfg->http_url[0])
+        go = run_net("HTTP  x1", cfg->http_url, path, len, 1, &rows[nrows++]);
+
+    // Summary
+    consoleClear();
+    log_printf("=== Summary (TCP_WND %s) ===\n", TCP_WND_LABEL);
+    log_printf("RTT min/med  %lu/%lu ms\n", (unsigned long)rtt_min,
+               (unsigned long)rtt_med);
+    log_printf("CPU chacha   %lu KB/s\n", (unsigned long)chacha);
+    log_printf("CPU aes-gcm  %lu KB/s\n", (unsigned long)gcm);
+    log_printf("SD write     %lu KB/s\n", (unsigned long)sd);
+    log_printf("Test size    %lu KB\n\n", (unsigned long)(len / 1024));
+    log_printf("conn      raw  steady setup\n");
+    for (int i = 0; i < nrows; i++)
+        log_printf("%-8s %4lu  %5lu  %4lums%s\n", rows[i].label,
+                   (unsigned long)rows[i].raw_kbps,
+                   (unsigned long)rows[i].steady_kbps,
+                   (unsigned long)rows[i].setup_ms, rows[i].ok ? "" : " FAIL");
+    log_printf("(KB/s; steady excludes setup)\n");
+    if (rtt_med)
+        log_printf("1-conn limit ~%lu KB/s\n",
+                   (unsigned long)kbps(TCP_WND_BYTES, rtt_med));
+}

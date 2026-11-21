@@ -7,3 +7,8 @@ insecure=0
 
 ; 1 = write the full curl/TLS trace (no bodies, token redacted) to poc.log
 verbose=1
+
+; Optional, speed test only: plain-HTTP address of the same RomM instance,
+; to measure how much TLS costs. The token is sent unencrypted over this URL,
+; so use it only on your LAN.
+;http_url=http://192.168.1.10:8080

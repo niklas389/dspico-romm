@@ -105,6 +105,13 @@ bool config_load(config_t *cfg)
             while (len > 0 && cfg->url[len - 1] == '/')
                 cfg->url[--len] = '\0';
         }
+        else if (strcasecmp(key, "http_url") == 0)
+        {
+            snprintf(cfg->http_url, sizeof(cfg->http_url), "%s", val);
+            size_t len = strlen(cfg->http_url);
+            while (len > 0 && cfg->http_url[len - 1] == '/')
+                cfg->http_url[--len] = '\0';
+        }
         else if (strcasecmp(key, "insecure") == 0)
         {
             cfg->insecure = parse_bool(val);

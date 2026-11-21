@@ -12,6 +12,7 @@ typedef struct
 {
     char base_dir[CFG_PATH_MAX]; // e.g. "sd:/romm/" (always ends with '/')
     char url[CFG_URL_MAX];       // e.g. "https://romm.example.com" (no trailing '/')
+    char http_url[CFG_URL_MAX];  // Optional plain-HTTP URL, speed test only
     char token[CFG_TOKEN_MAX];   // Bearer token from device pairing, may be empty
     bool insecure;               // Skip certificate verification (diagnostics only)
     bool verbose;                // Write curl debug traces to the log file

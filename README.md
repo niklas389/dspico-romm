@@ -49,6 +49,26 @@ the DSi takes to parse it.
 Save your WPA2 network in **DSi System Settings → Internet → Advanced Setup**
 (connections 4–6). Connections 1–3 only support WEP or open networks.
 
+## Speed test
+
+Select a ROM of at least 8 MB and press **Y**. The suite measures:
+
+- the round-trip time to the server (via TCP connect),
+- the CPU speed of ChaCha20-Poly1305 and AES-128-GCM (the TLS cost),
+- the SD write speed,
+- download speed with 1, 2 and 4 parallel connections (HTTP Range requests,
+  8 MB each, data discarded),
+- optionally plain HTTP, if `http_url=` is set in `config.ini`.
+
+There are two builds, differing only in DSWiFi's TCP receive window:
+
+| ROM | TCP window | Single-connection limit |
+| --- | --- | --- |
+| `romm-poc.nds` | 4 x 1460 = 5840 B (stock) | about 5840 B / RTT |
+| `romm-poc-wnd32.nds` | 32 x 1460 = 46720 B | about 8x higher |
+
+Run the suite with both and compare the summaries in `poc.log`.
+
 ## Building
 
 The project needs BlocksDS with Mbed TLS, libcurl and zlib:
@@ -58,7 +78,11 @@ wf-pacman -Sy blocksds-toolchain toolchain-gcc-arm-none-eabi-zlib blocksds-mbedt
 ```
 
 ```bash
-make
+make            # romm-poc.nds
+```
+
+```bash
+make variants   # also romm-poc-wnd32.nds (rebuilds DSWiFi, see tools/build_dswifi.sh)
 ```
 
 GitHub Actions builds `romm-poc.nds` on every push; see the workflow's

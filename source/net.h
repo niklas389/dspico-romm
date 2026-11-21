@@ -55,6 +55,25 @@ bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
 bool net_download(const char *path, FILE *fp, net_progress_fn cb, void *ctx,
                   net_result_t *res);
 
+typedef struct
+{
+    int conns;
+    bool ok;
+    long status;          // HTTP status of the first connection (expect 206)
+    uint64_t bytes;       // Body bytes received over all connections
+    uint32_t total_ms;    // Wall time including connection setup
+    uint32_t setup_ms;    // Until the slowest connection got its first byte
+    const char *tls_cipher;
+    char error[128];
+} net_par_result_t;
+
+// Downloads bytes [0, length) of <base_url><path> over `conns` parallel
+// connections (HTTP Range requests), discarding the data. base_url NULL means
+// the configured URL. Each connection is new, so TLS setup is included.
+bool net_download_parallel(const char *base_url, const char *path,
+                           uint64_t length, int conns, net_progress_fn cb,
+                           void *ctx, net_par_result_t *out);
+
 // URL-encodes a path segment. The returned string must be freed with free().
 char *net_escape(const char *s);
 
