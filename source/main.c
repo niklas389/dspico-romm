@@ -690,6 +690,11 @@ int main(int argc, char **argv)
 
     step_system_info();
 
+    extern bool selftest_chachapoly(void);
+    if (!selftest_chachapoly())
+        fatal("ChaCha20-Poly1305 self-test FAILED");
+    log_printf("Crypto self-test: OK\n");
+
     if (!have_cfg)
         fatal("romm/config.ini not found or\nmissing url= (see README)");
 

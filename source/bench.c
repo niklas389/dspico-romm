@@ -275,6 +275,21 @@ typedef struct
 
 static const config_t *g_bench_cfg;
 
+extern volatile int g_memcpy_stats_on;
+void memcpy_stats_reset(void);
+int memcpy_stats_get(uint32_t *out, int max_entries);
+
+static void memcpy_stats_log(const char *label)
+{
+    static uint32_t t[64 * 4];
+    int n = memcpy_stats_get(t, 64);
+    log_file_only("memcpy call sites (%s): caller calls bytes src_region\n", label);
+    for (int i = 0; i < n; i++)
+        log_file_only("  mcs %08lx %lu %lu %02lx\n", (unsigned long)t[4 * i],
+                      (unsigned long)t[4 * i + 1], (unsigned long)t[4 * i + 2],
+                      (unsigned long)t[4 * i + 3]);
+}
+
 static void save_samples(const config_t *cfg, const char *name)
 {
     uint32_t n = prof_sampling_stop();
@@ -316,10 +331,18 @@ static bool run_net(const char *label, const char *base, const char *path,
     net_par_result_t r;
     prof_reset();
     if (conns == 1)
+    {
+        memcpy_stats_reset();
+        g_memcpy_stats_on = 1;
         prof_sampling_start();
+    }
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
     if (conns == 1)
+    {
+        g_memcpy_stats_on = 0;
         save_samples(g_bench_cfg, "prof-" TCP_WND_LABEL "-net.bin");
+        memcpy_stats_log("net");
+    }
     prof_fill(row, r.total_ms);
     stats_delta(row, &st);
     printf("\x1b[22;0H                    \n");
@@ -372,10 +395,18 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
     prof_reset();
     bool sample = buf_size == 32 * 1024;
     if (sample)
+    {
+        memcpy_stats_reset();
+        g_memcpy_stats_on = 1;
         prof_sampling_start();
+    }
     bool ok = net_download_range(path, 0, len - 1, f, net_progress, NULL, &r);
     if (sample)
+    {
+        g_memcpy_stats_on = 0;
         save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
+        memcpy_stats_log("sd");
+    }
     prof_fill(row, r.total_ms);
     fclose(f);
     stats_delta(row, &st);

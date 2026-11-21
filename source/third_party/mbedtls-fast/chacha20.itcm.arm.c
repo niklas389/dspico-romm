@@ -11,6 +11,9 @@
 
 #include "common.h"
 
+/* dspico-romm: keystream8 is read as words in xor_block64(). */
+#pragma GCC optimize ("no-strict-aliasing")
+
 #if defined(MBEDTLS_CHACHA20_C)
 
 #include "mbedtls/chacha20.h"
@@ -198,6 +201,59 @@ int mbedtls_chacha20_starts(mbedtls_chacha20_context *ctx,
     return 0;
 }
 
+/* dspico-romm: XOR one 64-byte block with the keystream using word accesses.
+ * TLS decrypts in place at a misaligned address (in_buf + 13), so input and
+ * output usually share the same misalignment: the data is processed as
+ * aligned words and the (aligned) keystream is shifted into place instead.
+ * Falls back to bytes if input and output alignments differ. */
+#define XOR_SHIFTED(M)                                                        \
+    for (int w = 0; w < 15; w++) {                                            \
+        uint32_t k = (ks[w] >> (8 * (M))) | (ks[w + 1] << (32 - 8 * (M)));     \
+        dw[w] = sw[w] ^ k;                                                    \
+    }
+
+static void xor_block64(unsigned char *out, const unsigned char *in,
+                        const uint32_t *ks)
+{
+    const unsigned char *ks8 = (const unsigned char *) ks;
+    unsigned int k = (uintptr_t) out & 3U;
+
+    if (((uintptr_t) in & 3U) != k) {
+        for (int i = 0; i < 64; i++) {
+            out[i] = in[i] ^ ks8[i];
+        }
+        return;
+    }
+
+    if (k == 0) {
+        uint32_t *dw = (uint32_t *) out;
+        const uint32_t *sw = (const uint32_t *) in;
+        for (int w = 0; w < 16; w++) {
+            dw[w] = sw[w] ^ ks[w];
+        }
+        return;
+    }
+
+    unsigned int lead = 4U - k; /* 1..3 bytes until out is aligned */
+    for (unsigned int i = 0; i < lead; i++) {
+        out[i] = in[i] ^ ks8[i];
+    }
+
+    uint32_t *dw = (uint32_t *) (out + lead);
+    const uint32_t *sw = (const uint32_t *) (in + lead);
+    if (lead == 1) {
+        XOR_SHIFTED(1)
+    } else if (lead == 2) {
+        XOR_SHIFTED(2)
+    } else {
+        XOR_SHIFTED(3)
+    }
+
+    for (unsigned int i = lead + 60; i < 64; i++) {
+        out[i] = in[i] ^ ks8[i];
+    }
+}
+
 int mbedtls_chacha20_update(mbedtls_chacha20_context *ctx,
                             size_t size,
                             const unsigned char *input,
@@ -221,7 +277,8 @@ int mbedtls_chacha20_update(mbedtls_chacha20_context *ctx,
         chacha20_block(ctx->state, ctx->keystream8);
         ctx->state[CHACHA20_CTR_INDEX]++;
 
-        mbedtls_xor(output + offset, input + offset, ctx->keystream8, 64U);
+        xor_block64(output + offset, input + offset,
+                    (const uint32_t *) ctx->keystream8);
 
         offset += CHACHA20_BLOCK_SIZE_BYTES;
         size   -= CHACHA20_BLOCK_SIZE_BYTES;
