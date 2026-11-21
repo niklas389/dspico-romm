@@ -145,13 +145,15 @@ static bool wait_sd_done(void)
     return false;
 }
 
-static bool write_sector(uint32_t lba, const uint32_t *src, bool dma)
+// Sends one sector of a sequential write (docs/commands.md "SD write"):
+// NTR_CMD_ID_GAME_WRITE_SD_DATA = F6 E1 0D 9Q SS SS SS SS, Q = 10XY with
+// X = first sector, Y = last sector of the sequence.
+static bool send_sector(uint32_t lba, const uint32_t *src, bool first, bool last, bool dma)
 {
     if (!wait_clear(ROMCTRL_BUSY))
         return false;
 
-    // NTR_CMD_ID_GAME_WRITE_SD_DATA, first and last sector of a write
-    set_cmd(0xF6, 0xE1, 0x0D, 0x9B, lba);
+    set_cmd(0xF6, 0xE1, 0x0D, 0x98 | (first ? 2 : 0) | (last ? 1 : 0), lba);
 
     if (dma)
     {
@@ -170,23 +172,19 @@ static bool write_sector(uint32_t lba, const uint32_t *src, bool dma)
             for (int i = 0; i < TIMEOUT && (R_ROMCTRL & ROMCTRL_BUSY); i++)
                 if (R_ROMCTRL & ROMCTRL_DRQ)
                     R_DATA = 0;
-            wait_sd_done();
             return false;
         }
+        return true;
     }
-    else
+
+    R_ROMCTRL = DSPICO_WRITE_SETTINGS;
+    for (int i = 0; i < 128; i++)
     {
-        R_ROMCTRL = DSPICO_WRITE_SETTINGS;
-        for (int i = 0; i < 128; i++)
-        {
-            if (!wait_set(ROMCTRL_DRQ))
-                return false;
-            R_DATA = src[i];
-        }
-        if (!wait_clear(ROMCTRL_BUSY))
+        if (!wait_set(ROMCTRL_DRQ))
             return false;
+        R_DATA = src[i];
     }
-    return wait_sd_done();
+    return wait_clear(ROMCTRL_BUSY);
 }
 
 bool sdraw_write(uint32_t lba, const void *src, uint32_t count, bool dma)
@@ -196,10 +194,20 @@ bool sdraw_write(uint32_t lba, const void *src, uint32_t count, bool dma)
     if (dma)
         DC_FlushRange(src, count * 512);
 
+    // Sequential write: while the DSpico writes sector i-1 to the SD card,
+    // sector i is already transferred; then wait for i-1 to complete.
     const uint32_t *s = src;
     bool ok = true;
     for (uint32_t i = 0; i < count && ok; i++)
-        ok = write_sector(lba + i, s + i * 128, dma);
+    {
+        ok = send_sector(lba + i, s + i * 128, i == 0, i == count - 1, dma);
+        if (ok && i > 0)
+            ok = wait_sd_done(); // sector i - 1
+    }
+    if (ok)
+        ok = wait_sd_done(); // last sector
+    else
+        wait_sd_done();
 
     cache_sector_invalidate(0, lba, lba + count - 1); // DEV_DLDI
     return ok;
