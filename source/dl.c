@@ -37,11 +37,27 @@ bool dl_yield_per_record = true;
 #include "tlsrx.h"
 
 // Decrypt TLS records ourselves, straight from the network buffers (tlsrx.h).
+#if defined(DSPICO_DSWIFI) || !defined(__NDS__)
 bool dl_zero_copy_tls = true;
+#else
+bool dl_zero_copy_tls = false;
+#endif
 
-// DSWiFi lwIP patch (patches/dswifi-recv-zc.patch)
+// DSWiFi lwIP patch (patches/dswifi-recv-zc.patch). The stock DSWiFi build
+// (romm-poc.nds) does not have it: zero-copy TLS is then never used.
+#if defined(DSPICO_DSWIFI) || !defined(__NDS__)
 ssize_t lwip_recv_zc(int s, size_t max,
                      size_t (*fn)(void *ctx, const void *data, size_t len), void *ctx);
+#else
+static ssize_t lwip_recv_zc(int s, size_t max,
+                            size_t (*fn)(void *ctx, const void *data, size_t len),
+                            void *ctx)
+{
+    (void)s; (void)max; (void)fn; (void)ctx;
+    errno = EIO;
+    return -1;
+}
+#endif
 
 #define DL_TIMEOUT_MS   30000 // No data for this long: give up (like curl's low-speed limit)
 #define DL_POLL_MS      250   // Progress callback / cancel check interval while waiting

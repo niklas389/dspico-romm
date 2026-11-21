@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.27 | – | – | ROM downloads into `/roms/<platform>/` (download.c) |
 | 0.26 | 1104 | **1055** (raw DMA writer, verified; DLDI 890) | interrupt-driven DSpico DMA SD writer (`dl SDraw`), ARM7 safety poll removed |
 | 0.25 | – | – | raw sequential writes 3079 (CPU) / 2976 (DMA) KB/s, verified; Wi-Fi died during the downloads (ARM7 4 ms poll) |
 | 0.24 | 966 | 918 (961 ARM7 prio) | raw DSpico writes verified (CPU and DMA) but 150 KB/s single-sector; one Wi-Fi connect hang |
@@ -98,6 +99,24 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 
 The patched builds also use a matching ARM7 core, because the RX buffer is
 shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
+
+## Downloading ROMs
+
+Pick a platform and a ROM, then press A. The ROM is saved to
+`<SD>/roms/<folder>/<file name>`; the folder comes from the RomM platform:
+
+| RomM platform | Folder |
+| --- | --- |
+| `nds` | `roms/nds` |
+| `nintendo-dsi` | `roms/dsi` |
+| `gba` | `roms/gba` |
+| others | RomM's folder name for the platform |
+
+The download goes to `<file name>.part` first and is renamed when it is
+complete; an interrupted transfer resumes with HTTP Range requests (up to 5
+attempts). On a DSpico the file is written with interrupt-driven DMA
+(`sdraw=1` in `config.ini`, the default); otherwise through the DLDI driver.
+B cancels. Y in the ROM menu runs the speed test.
 
 ## Building
 

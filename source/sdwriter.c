@@ -34,6 +34,7 @@ struct sdwriter
     int n_ext;
     uint32_t file_sector;  // Next sector of the file to write
     uint32_t sum;          // Checksum of everything written (sdw_checksum)
+    volatile uint64_t written; // Bytes that reached the file
 };
 
 // Word-wise checksum of the data stream (speed test verification). Data
@@ -136,6 +137,8 @@ static int writer_thread(void *arg)
             if (w->ext ? !raw_write(w, w->ring + w->tail, n)
                        : fwrite(w->ring + w->tail, 1, n, w->fp) != n)
                 w->failed = true;
+            else
+                w->written += n;
             w->write_ticks += prof_ticks() - t0;
         }
 
@@ -189,6 +192,26 @@ sdwriter_t *sdw_open_raw(FILE *fp, size_t ring_size, size_t chunk,
         w->n_ext = n_ext;
     }
     return w;
+}
+
+static uint64_t g_last_written;
+
+uint64_t sdw_last_written(void)
+{
+    return g_last_written;
+}
+
+bool sdw_raw_seek(sdwriter_t *w, uint64_t offset)
+{
+    if (!w->ext || (offset & 511) != 0 || w->used != 0)
+        return false;
+    w->file_sector = (uint32_t)(offset / 512);
+    return true;
+}
+
+uint64_t sdw_written(const sdwriter_t *w)
+{
+    return w->written;
 }
 
 uint32_t sdw_checksum(const sdwriter_t *w)
@@ -276,6 +299,7 @@ bool sdw_close_sum(sdwriter_t *w, uint32_t *sum)
     bool ok = !w->failed;
     if (sum)
         *sum = w->sum;
+    g_last_written = w->written;
     free(w->ring);
     free(w);
     return ok;

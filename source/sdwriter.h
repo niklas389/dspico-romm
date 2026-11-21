@@ -34,6 +34,14 @@ void sdw_commit(sdwriter_t *w, size_t n);
 sdwriter_t *sdw_open_raw(FILE *fp, size_t ring_size, size_t chunk,
                          const sdraw_extent_t *ext, int n_ext);
 
+// Raw mode: start writing at this file offset (a multiple of 512) instead
+// of 0. Call before the first write.
+bool sdw_raw_seek(sdwriter_t *w, uint64_t offset);
+
+// Bytes that reached the file so far / in the writer closed last.
+uint64_t sdw_written(const sdwriter_t *w);
+uint64_t sdw_last_written(void);
+
 // Checksum of all data written so far, and the same function for checking
 // a file read back (start with sum = 0).
 uint32_t sdw_checksum(const sdwriter_t *w);

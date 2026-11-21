@@ -9,6 +9,10 @@ save_slot=autosave
 ; if your network path needs it. DSWiFi's own default is 1300.
 mtu=1500
 
+; 1 = on a DSpico, downloads write the SD card with interrupt-driven DMA
+; (faster, verified in the speed test). 0 = always use the DLDI driver.
+sdraw=1
+
 ; 1 = lwIP reads received packets in place from the Wi-Fi ring buffer
 ; (no copy). Set to 0 if downloads stall or fail.
 zerocopy=1

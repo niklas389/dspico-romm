@@ -23,6 +23,7 @@
 #include <nds.h>
 
 #include "bench.h"
+#include "download.h"
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
@@ -396,111 +397,75 @@ static void step_pair(void)
 
 typedef struct
 {
-    const char *label;
     uint32_t last_ui_ms;
-    bool cancelled;
+    uint64_t base;        // Bytes done before the current request (resume)
 } dl_ui_t;
 
 static bool download_progress(void *ctx, uint64_t now, uint64_t total,
                               uint32_t elapsed_ms)
 {
     dl_ui_t *ui = ctx;
+    (void)total;
 
     scanKeys();
     if (keysDown() & KEY_B)
-    {
-        ui->cancelled = true;
         return false;
-    }
 
     if (elapsed_ms - ui->last_ui_ms < 500)
         return true;
     ui->last_ui_ms = elapsed_ms;
 
     uint32_t kbps = elapsed_ms ? (uint32_t)((now * 1000 / 1024) / elapsed_ms) : 0;
-    char a[16], b[16];
+    char a[16];
     format_size(now, a, sizeof(a));
-    format_size(total, b, sizeof(b));
-    printf("\x1b[10;0H%s / %s          \n%lu KB/s  %lus        \n", a, b,
-           (unsigned long)kbps, (unsigned long)(elapsed_ms / 1000));
+    printf("\x1b[8;0H%s  %lu KB/s  %lus        \n", a, (unsigned long)kbps,
+           (unsigned long)(elapsed_ms / 1000));
     return true;
 }
 
-static void download_test(int rom_id, const char *fs_name, uint64_t size,
-                          bool to_sd)
+// Downloads a ROM into <drive>/roms/<folder>/ (download.c).
+static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
+                                const char *folder)
 {
-    char *escaped = net_escape(fs_name);
-    if (!escaped)
-        return;
-
-    char path[512];
-    snprintf(path, sizeof(path), "/api/roms/%d/content/%s", rom_id, escaped);
-    free(escaped);
-
-    FILE *fp = NULL;
-    char out_path[CFG_PATH_MAX + 256];
-    if (to_sd)
-    {
-        char dir[CFG_PATH_MAX + 16];
-        config_path(&g_cfg, "test", dir, sizeof(dir));
-        mkdir(dir, 0777);
-        snprintf(out_path, sizeof(out_path), "%s/%s", dir, fs_name);
-        fp = fopen(out_path, "wb");
-        if (!fp)
-        {
-            log_printf("Can't create %s\n", out_path);
-            press_any_key();
-            return;
-        }
-        // Large buffer so FAT writes happen in big sequential chunks.
-        setvbuf(fp, NULL, _IOFBF, 64 * 1024);
-    }
+    char target[CFG_PATH_MAX + 256];
+    download_target(&g_cfg, folder, fs_name, target, sizeof(target));
 
     consoleClear();
     char sz[16];
     format_size(size, sz, sizeof(sz));
-    printf("Downloading (%s)\n%.31s\n%s\n\nB: cancel\n", to_sd ? "to SD" : "discard",
-           fs_name, sz);
+    printf("Download\n%.31s\n%s -> roms/%s/\n", fs_name, sz, folder);
+
+    uint64_t have = 0;
+    if (download_exists(&g_cfg, folder, fs_name, &have))
+    {
+        char hs[16];
+        format_size(have, hs, sizeof(hs));
+        printf("\nAlready on SD (%s).\nA: download again  B: back\n", hs);
+        if (!(wait_key() & KEY_A))
+            return;
+        consoleClear();
+        printf("Download\n%.31s\n%s -> roms/%s/\n", fs_name, sz, folder);
+    }
+    printf("\nB: cancel\n");
 
     dl_ui_t ui = { 0 };
-    net_result_t res;
-    net_wifi_stats_t st0, st1;
-    net_wifi_stats(&st0);
-    bool ok = net_download(path, fp, download_progress, &ui, &res);
-    net_wifi_stats(&st1);
+    download_result_t r;
+    bool ok = download_rom(&g_cfg, rom_id, fs_name, size, folder, download_progress, &ui, &r);
 
-    uint32_t close_ms = 0;
-    if (fp)
-    {
-        uint32_t t0 = net_now_ms();
-        fclose(fp);
-        close_ms = net_now_ms() - t0;
-        if (!ok)
-            remove(out_path);
-    }
-
-    printf("\x1b[13;0H");
-    log_printf("\n[DL %s] %s\n", to_sd ? "SD" : "net", fs_name);
-    net_log_result("download", &res);
-    if (res.total_ms > 0)
-    {
-        uint32_t kbps = (uint32_t)((res.body_bytes * 1000 / 1024) / res.total_ms);
-        log_printf("  => %lu KB/s avg\n", (unsigned long)kbps);
-    }
-    if (fp)
-        log_printf("  fclose %lu ms\n", (unsigned long)close_ms);
-    log_printf("  rx queued %lu, lost %lu\n",
-               (unsigned long)(st1.rx_queued - st0.rx_queued),
-               (unsigned long)(st1.rx_lost - st0.rx_lost));
-    if (ui.cancelled)
-        log_printf("  cancelled by user\n");
-    else if (!ok)
-        log_printf("  FAILED\n");
-
+    uint32_t kbps = r.ms ? (uint32_t)((r.bytes * 1000 / 1024) / r.ms) : 0;
+    printf("\x1b[10;0H");
+    log_printf("\n[Download] %s -> %s\n", fs_name, r.path);
+    log_printf("  %s: %llu B in %lu ms (%lu KB/s), %s, %d request(s)\n",
+               ok ? "done" : (r.cancelled ? "cancelled" : "FAILED"),
+               (unsigned long long)r.bytes, (unsigned long)r.ms, (unsigned long)kbps,
+               r.raw ? "DSpico DMA" : "DLDI", r.attempts);
+    if (!ok && !r.cancelled)
+        log_printf("  %s\n", r.error);
     press_any_key();
 }
 
-static void browse_platform(int platform_id, const char *platform_name)
+static void browse_platform(int platform_id, const char *platform_name,
+                            const char *folder)
 {
     int offset = 0;
     int cursor = 0;
@@ -598,14 +563,13 @@ static void browse_platform(int platform_id, const char *platform_name)
         cJSON_Delete(root);
 
         consoleClear();
-        printf("%s\n\nA: download to SD\nX: download, discard (net only)\n"
+        bool on_sd = download_exists(&g_cfg, folder, fs_name_copy, NULL);
+        printf("%s\n%s\n\nA: download to roms/%s/\n"
                "Y: speed test suite\nB: back\n",
-               label_buf[sel]);
+               label_buf[sel], on_sd ? "(on SD)" : "", folder);
         u16 k = wait_key();
         if (k & KEY_A)
-            download_test(rom_id, fs_name_copy, size, true);
-        else if (k & KEY_X)
-            download_test(rom_id, fs_name_copy, size, false);
+            download_to_library(rom_id, fs_name_copy, size, folder);
         else if (k & KEY_Y)
         {
             bench_run_suite(&g_cfg, rom_id, fs_name_copy, size);
@@ -643,6 +607,7 @@ static void step_platforms(void)
     const char **labels = calloc(count, sizeof(char *));
     char (*label_buf)[40] = calloc(count, sizeof(*label_buf));
     int *ids = calloc(count, sizeof(int));
+    char (*folders)[32] = calloc(count, sizeof(*folders));
 
     for (int i = 0; i < count; i++)
     {
@@ -651,6 +616,8 @@ static void step_platforms(void)
         if (!name)
             name = json_str(p, "name");
         ids[i] = (int)json_num(p, "id", 0);
+        snprintf(folders[i], sizeof(folders[i]), "%s",
+                 download_folder(json_str(p, "slug"), json_str(p, "fs_slug")));
         snprintf(label_buf[i], sizeof(label_buf[i]), "%-24.24s %5d",
                  name ? name : "?", (int)json_num(p, "rom_count", 0));
         labels[i] = label_buf[i];
@@ -667,12 +634,13 @@ static void step_platforms(void)
 
         char name[32];
         snprintf(name, sizeof(name), "%.24s", label_buf[sel]);
-        browse_platform(ids[sel], name);
+        browse_platform(ids[sel], name, folders[sel]);
     }
 
     free(labels);
     free(label_buf);
     free(ids);
+    free(folders);
     cJSON_Delete(root);
 }
 
