@@ -22,8 +22,8 @@ OUT="${3:?output directory}"
 DSWIFI_COMMIT=84d91e8c517bd7d15d38aff039640beaf359c230
 SDK_TAG=v1.25.0
 
-if [ "$WND_MSS" -gt 44 ]; then
-    echo "TCP_WND must stay below 64 KiB without window scaling (max 44)" >&2
+if [ "$WND_MSS" -gt 176 ]; then
+    echo "TCP_WND too large (max 176 MSS with window scale 2)" >&2
     exit 1
 fi
 
@@ -59,6 +59,14 @@ sed -i "s/#define DSPICO_TCP_WND_MSS 32/#define DSPICO_TCP_WND_MSS $WND_MSS/" \
     "$SRC/source/arm9/lwip/include/lwipopts.h"
 sed -i "s/#define DSPICO_RXBUF_KB 12/#define DSPICO_RXBUF_KB $RXBUF_KB/" \
     "$SRC/source/common/wifi_shared.h"
+# Windows of 64 KiB and more need TCP window scaling (RFC 7323). The socket
+# mailbox must also hold one entry per segment of a full window.
+if [ "$WND_MSS" -gt 44 ]; then
+    sed -i "s/^#define TCP_WND .*/&\n#define LWIP_WND_SCALE 1\n#define TCP_RCV_SCALE 2/" \
+        "$SRC/source/arm9/lwip/include/lwipopts.h"
+    sed -i "s/^#define DEFAULT_TCP_RECVMBOX_SIZE .*/#define DEFAULT_TCP_RECVMBOX_SIZE $((WND_MSS * 2))/" \
+        "$SRC/source/arm9/lwip/include/lwipopts.h"
+fi
 
 make -C "$SRC" -f Makefile.arm9 ENABLE_LWIP=1 -j"$(nproc)" >/dev/null
 make -C "$SRC" -f Makefile.arm7 -j"$(nproc)" >/dev/null
