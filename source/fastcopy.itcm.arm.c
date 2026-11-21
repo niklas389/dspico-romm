@@ -20,6 +20,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// GCC turns copy loops into calls to memcpy at -O2. Here that call would be
+// this very function (through the linker wrap): endless recursion. Keep the
+// loops as written.
+#pragma GCC optimize ("no-tree-loop-distribute-patterns")
+
 #ifdef __NDS__
 #include <nds/ndstypes.h>
 #define FASTCOPY_ATTR ITCM_CODE ARM_CODE __attribute__((noinline))
