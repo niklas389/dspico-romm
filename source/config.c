@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -72,6 +73,7 @@ bool config_load(config_t *cfg)
     memset(cfg, 0, sizeof(*cfg));
 
     snprintf(cfg->save_slot, sizeof(cfg->save_slot), "autosave");
+    cfg->mtu = 1500;
 
     if (!find_base_dir(cfg))
         return false;
@@ -118,6 +120,12 @@ bool config_load(config_t *cfg)
         {
             if (val[0])
                 snprintf(cfg->save_slot, sizeof(cfg->save_slot), "%s", val);
+        }
+        else if (strcasecmp(key, "mtu") == 0)
+        {
+            int v = atoi(val);
+            if (v >= 576 && v <= 1500)
+                cfg->mtu = v;
         }
         else if (strcasecmp(key, "insecure") == 0)
         {

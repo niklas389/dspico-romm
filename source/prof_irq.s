@@ -6,8 +6,8 @@
 // of the interrupted code directly from the system/user bank (shared by both
 // modes): briefly switch to system mode with IRQs disabled. For leaf
 // functions such as memcpy that is the caller's address.
-// r1 = [sp] is passed too, in case the handler already runs in system mode
-// (then lr_sys was pushed by IntrMain and is at [sp]).
+// libnds' IntrMain calls handlers in system mode after "push {r0, lr}", where
+// r0 is the saved CPSR; the interrupted code's lr_sys is therefore at [sp, #4].
 
     .syntax unified
     .arm
@@ -22,7 +22,7 @@ prof_irq_entry:
     msr     cpsr_c, r2
     and     r3, r2, #0x1F
     cmp     r3, #0x1F
-    ldreq   r0, [sp]            // Already in system mode: use the pushed lr
+    ldreq   r0, [sp, #4]        // System mode: lr pushed by IntrMain
     ldr     r3, =prof_irq_c
     bx      r3
     .size   prof_irq_entry, . - prof_irq_entry

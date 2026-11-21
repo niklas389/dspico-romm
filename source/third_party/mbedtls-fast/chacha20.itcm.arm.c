@@ -34,113 +34,49 @@
 
 #define CHACHA20_BLOCK_SIZE_BYTES (4U * 16U)
 
-/**
- * \brief           ChaCha20 quarter round operation.
+/*
+ * dspico-romm: keystream block with the whole state in local variables.
  *
- *                  The quarter round is defined as follows (from RFC 7539):
- *                      1.  a += b; d ^= a; d <<<= 16;
- *                      2.  c += d; b ^= c; b <<<= 12;
- *                      3.  a += b; d ^= a; d <<<= 8;
- *                      4.  c += d; b ^= c; b <<<= 7;
- *
- * \param state     ChaCha20 state to modify.
- * \param a         The index of 'a' in the state.
- * \param b         The index of 'b' in the state.
- * \param c         The index of 'c' in the state.
- * \param d         The index of 'd' in the state.
+ * The original copies the state into a stack array with memcpy(), runs the
+ * rounds on that array (a load and a store per operation), stores the result
+ * through MBEDTLS_PUT_UINT32_LE (another memcpy) and zeroizes the array. Here
+ * GCC keeps most of the 16 words in registers and folds every rotation into
+ * the operand of the following instruction. The keystream buffer is
+ * ctx->keystream8, which follows uint32_t state[16] and is word aligned; the
+ * target is little-endian, so words are stored directly.
  */
-static inline void chacha20_quarter_round(uint32_t state[16],
-                                          size_t a,
-                                          size_t b,
-                                          size_t c,
-                                          size_t d)
+#define CHACHA_QR(a, b, c, d)                    \
+    do {                                         \
+        a += b; d ^= a; d = ROTL32(d, 16);       \
+        c += d; b ^= c; b = ROTL32(b, 12);       \
+        a += b; d ^= a; d = ROTL32(d, 8);        \
+        c += d; b ^= c; b = ROTL32(b, 7);        \
+    } while (0)
+
+static void chacha20_block(const uint32_t s[16], unsigned char keystream[64])
 {
-    /* a += b; d ^= a; d <<<= 16; */
-    state[a] += state[b];
-    state[d] ^= state[a];
-    state[d] = ROTL32(state[d], 16);
+    uint32_t x0 = s[0], x1 = s[1], x2 = s[2], x3 = s[3];
+    uint32_t x4 = s[4], x5 = s[5], x6 = s[6], x7 = s[7];
+    uint32_t x8 = s[8], x9 = s[9], x10 = s[10], x11 = s[11];
+    uint32_t x12 = s[12], x13 = s[13], x14 = s[14], x15 = s[15];
 
-    /* c += d; b ^= c; b <<<= 12 */
-    state[c] += state[d];
-    state[b] ^= state[c];
-    state[b] = ROTL32(state[b], 12);
+    for (int i = 0; i < 10; i++) {
+        CHACHA_QR(x0, x4, x8,  x12);
+        CHACHA_QR(x1, x5, x9,  x13);
+        CHACHA_QR(x2, x6, x10, x14);
+        CHACHA_QR(x3, x7, x11, x15);
 
-    /* a += b; d ^= a; d <<<= 8; */
-    state[a] += state[b];
-    state[d] ^= state[a];
-    state[d] = ROTL32(state[d], 8);
-
-    /* c += d; b ^= c; b <<<= 7; */
-    state[c] += state[d];
-    state[b] ^= state[c];
-    state[b] = ROTL32(state[b], 7);
-}
-
-/**
- * \brief           Perform the ChaCha20 inner block operation.
- *
- *                  This function performs two rounds: the column round and the
- *                  diagonal round.
- *
- * \param state     The ChaCha20 state to update.
- */
-static void chacha20_inner_block(uint32_t state[16])
-{
-    chacha20_quarter_round(state, 0, 4, 8,  12);
-    chacha20_quarter_round(state, 1, 5, 9,  13);
-    chacha20_quarter_round(state, 2, 6, 10, 14);
-    chacha20_quarter_round(state, 3, 7, 11, 15);
-
-    chacha20_quarter_round(state, 0, 5, 10, 15);
-    chacha20_quarter_round(state, 1, 6, 11, 12);
-    chacha20_quarter_round(state, 2, 7, 8,  13);
-    chacha20_quarter_round(state, 3, 4, 9,  14);
-}
-
-/**
- * \brief               Generates a keystream block.
- *
- * \param initial_state The initial ChaCha20 state (key, nonce, counter).
- * \param keystream     Generated keystream bytes are written to this buffer.
- */
-static void chacha20_block(const uint32_t initial_state[16],
-                           unsigned char keystream[64])
-{
-    uint32_t working_state[16];
-    size_t i;
-
-    memcpy(working_state,
-           initial_state,
-           CHACHA20_BLOCK_SIZE_BYTES);
-
-    for (i = 0U; i < 10U; i++) {
-        chacha20_inner_block(working_state);
+        CHACHA_QR(x0, x5, x10, x15);
+        CHACHA_QR(x1, x6, x11, x12);
+        CHACHA_QR(x2, x7, x8,  x13);
+        CHACHA_QR(x3, x4, x9,  x14);
     }
 
-    working_state[0] += initial_state[0];
-    working_state[1] += initial_state[1];
-    working_state[2] += initial_state[2];
-    working_state[3] += initial_state[3];
-    working_state[4] += initial_state[4];
-    working_state[5] += initial_state[5];
-    working_state[6] += initial_state[6];
-    working_state[7] += initial_state[7];
-    working_state[8] += initial_state[8];
-    working_state[9] += initial_state[9];
-    working_state[10] += initial_state[10];
-    working_state[11] += initial_state[11];
-    working_state[12] += initial_state[12];
-    working_state[13] += initial_state[13];
-    working_state[14] += initial_state[14];
-    working_state[15] += initial_state[15];
-
-    for (i = 0U; i < 16; i++) {
-        size_t offset = i * 4U;
-
-        MBEDTLS_PUT_UINT32_LE(working_state[i], keystream, offset);
-    }
-
-    mbedtls_platform_zeroize(working_state, sizeof(working_state));
+    uint32_t *k = (uint32_t *) (void *) keystream;
+    k[0]  = x0  + s[0];  k[1]  = x1  + s[1];  k[2]  = x2  + s[2];  k[3]  = x3  + s[3];
+    k[4]  = x4  + s[4];  k[5]  = x5  + s[5];  k[6]  = x6  + s[6];  k[7]  = x7  + s[7];
+    k[8]  = x8  + s[8];  k[9]  = x9  + s[9];  k[10] = x10 + s[10]; k[11] = x11 + s[11];
+    k[12] = x12 + s[12]; k[13] = x13 + s[13]; k[14] = x14 + s[14]; k[15] = x15 + s[15];
 }
 
 void mbedtls_chacha20_init(mbedtls_chacha20_context *ctx)

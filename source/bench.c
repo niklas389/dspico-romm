@@ -283,6 +283,8 @@ static void memcpy_stats_log(const char *label)
 {
     static uint32_t t[64 * 4];
     int n = memcpy_stats_get(t, 64);
+    if (n == 0)
+        return; // Built without MEMCPY_STATS
     log_file_only("memcpy call sites (%s): caller calls bytes src_region\n", label);
     for (int i = 0; i < n; i++)
         log_file_only("  mcs %08lx %lu %lu %02lx\n", (unsigned long)t[4 * i],
@@ -323,21 +325,21 @@ static void stats_delta(net_row_t *row, const net_wifi_stats_t *a)
 }
 
 static bool run_net(const char *label, const char *base, const char *path,
-                    uint64_t len, int conns, net_row_t *row)
+                    uint64_t len, int conns, bool sample, net_row_t *row)
 {
     log_printf("%s...\n", label);
     net_wifi_stats_t st;
     net_wifi_stats(&st);
     net_par_result_t r;
     prof_reset();
-    if (conns == 1)
+    if (sample)
     {
         memcpy_stats_reset();
         g_memcpy_stats_on = 1;
         prof_sampling_start();
     }
     net_download_parallel(base, path, len, conns, net_progress, NULL, &r);
-    if (conns == 1)
+    if (sample)
     {
         g_memcpy_stats_on = 0;
         save_samples(g_bench_cfg, "prof-" TCP_WND_LABEL "-net.bin");
@@ -393,7 +395,8 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
     net_wifi_stats(&st);
     net_result_t r;
     prof_reset();
-    bool sample = buf_size == 32 * 1024;
+    (void)buf_size;
+    bool sample = false; // Profiled in the async test, the real download path
     if (sample)
     {
         memcpy_stats_reset();
@@ -463,12 +466,18 @@ static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len
     net_wifi_stats(&st);
     net_result_t r;
     prof_reset();
+    memcpy_stats_reset();
+    g_memcpy_stats_on = 1;
+    prof_sampling_start();
     bool ok = net_download_range_async(path, 0, len - 1, w, net_progress, NULL, &r);
     // Count the time to drain the ring: the download isn't done before that.
     uint64_t t0 = prof_ticks();
     uint64_t stall_ticks = sdw_stall_ticks(w);
     bool wok = sdw_close(w); // Drains the ring, then frees the writer
     uint32_t drain_ms = prof_ticks_to_ms(prof_ticks() - t0);
+    g_memcpy_stats_on = 0;
+    save_samples(cfg, "prof-" TCP_WND_LABEL "-sd.bin");
+    memcpy_stats_log("sd");
     fclose(f);
     stats_delta(row, &st);
     remove(file);
@@ -517,22 +526,33 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     g_bench_cfg = cfg;
     net_row_t rows[7];
     int nrows = 0;
-    // Parallel connections were shown to be slower; keep 1 and 2 only.
-    const char *labels[2] = { "HTTPS x1", "HTTPS x2" };
-    const int conns[2] = { 1, 2 };
+    // Parallel connections were shown to be slower (v0.3-v0.10): single
+    // connection only. Compare the DSWiFi default MTU with the configured one;
+    // each run opens a new connection, so the MSS follows the MTU.
     bool go = true;
-    for (int i = 0; i < 2 && go; i++)
-        go = run_net(labels[i], NULL, path, len, conns[i], &rows[nrows++]);
-
+#ifdef DSPICO_DSWIFI
+    extern void dswifi_set_mtu(u16 mtu);
+    static char lbl_cfg[16];
+    snprintf(lbl_cfg, sizeof(lbl_cfg), "MTU %d", cfg->mtu);
+    if (cfg->mtu != 1300)
+    {
+        dswifi_set_mtu(1300);
+        go = run_net("MTU 1300", NULL, path, len, 1, false, &rows[nrows++]);
+        dswifi_set_mtu(cfg->mtu);
+    }
     if (go)
-        go = run_net_sd(cfg, path, len, 32 * 1024, "SD 32K", &rows[nrows++]);
+        go = run_net(lbl_cfg, NULL, path, len, 1, true, &rows[nrows++]);
+#else
+    go = run_net("HTTPS x1", NULL, path, len, 1, true, &rows[nrows++]);
+#endif
+
     if (go)
         go = run_net_sd(cfg, path, len, 256 * 1024, "SD 256K", &rows[nrows++]);
     if (go)
         go = run_net_sd_async(cfg, path, len, &rows[nrows++]);
 
     if (go && cfg->http_url[0])
-        go = run_net("HTTP  x1", cfg->http_url, path, len, 1, &rows[nrows++]);
+        go = run_net("HTTP  x1", cfg->http_url, path, len, 1, false, &rows[nrows++]);
 
     // Summary
     consoleClear();

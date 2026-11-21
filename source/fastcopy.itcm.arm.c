@@ -126,6 +126,7 @@ typedef struct { uint32_t caller, calls, bytes, src_region; } mcs_t;
 static mcs_t g_mcs[MCS_SLOTS];
 volatile int g_memcpy_stats_on;
 
+__attribute__((unused))
 static void mcs_record(uint32_t caller, const void *src, size_t n)
 {
     uint32_t h = (caller >> 2) & (MCS_SLOTS - 1);
@@ -166,9 +167,13 @@ int memcpy_stats_get(uint32_t *out, int max_entries)
     return n;
 }
 
+#ifdef MEMCPY_STATS
 #define MCS(n)                                                               \
     if (g_memcpy_stats_on)                                                   \
         mcs_record((uint32_t)(uintptr_t)__builtin_return_address(0), src, n)
+#else
+#define MCS(n) (void)0 // Measured cost when enabled: ~11 % of the ARM9
+#endif
 
 // Linker wrappers. __aeabi_memcpy4/8 promise aligned pointers, but going
 // through the same function costs only a few cycles and keeps this simple.

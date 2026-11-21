@@ -5,6 +5,10 @@ url=https://romm.example.com
 ; RomM save slot used for save sync (Grout currently uses "autosave").
 save_slot=autosave
 
+; Wi-Fi MTU (576-1500). 1500 gives the largest TCP segments; lower it only
+; if your network path needs it. DSWiFi's own default is 1300.
+mtu=1500
+
 ; 1 = skip certificate verification. Diagnostics only.
 insecure=0
 

@@ -181,6 +181,16 @@ static void step_wifi(void)
                (unsigned long)((ip >> 24) & 0xFF));
     log_printf("MAC %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2],
                mac[3], mac[4], mac[5]);
+
+#ifdef DSPICO_DSWIFI
+    // DSWiFi defaults to 1300, so lwIP advertises an MSS of 1260 and every
+    // segment carries 1248 data bytes. 1500 means ~16 % fewer packets for the
+    // ARM7, the SDIO bus and lwIP. Needs the larger ARM7 mailbox buffer from
+    // patches/dswifi-fast-rx.patch.
+    extern void dswifi_set_mtu(u16 mtu);
+    dswifi_set_mtu(g_cfg.mtu);
+    log_printf("MTU: %d\n", g_cfg.mtu);
+#endif
 }
 
 static const char *json_str(const cJSON *obj, const char *key)

@@ -1,0 +1,101 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 864cf14..2dadd22 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -40,7 +40,8 @@ static int wifi_card_wlan_init(void);
+ #define AR601x_HOST_INTEREST_ADDRESS (0x00520000)
+ 
+ #define SDIO_TICK_INTERVAL_MS (1)
+-#define MBOX_TMPBUF_SIZE (0x600)
++// dspico-romm: room for 1500-byte MTU frames (round_up(len + 6, 0x80)).
++#define MBOX_TMPBUF_SIZE (0x800)
+ #define DATA_BUF_LEN (0x600)
+ 
+ // TODO: Allocate from wifi_card_init()?
+diff --git a/source/arm9/lwip/lwip_nds.h b/source/arm9/lwip/lwip_nds.h
+index 4144d39..66e63f9 100644
+--- a/source/arm9/lwip/lwip_nds.h
++++ b/source/arm9/lwip/lwip_nds.h
+@@ -44,6 +44,9 @@ u32 wifi_get_dns(int index);
+ bool wifi_get_ip6(struct in6_addr *addr);
+ 
+ void dswifi_send_data_to_lwip(void *data, u32 len);
++void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload, u32 len);
++void dswifi_set_mtu(u16 mtu);
++u16 dswifi_get_mtu(void);
+ 
+ void dswifi_lwip_setup_io_posix(void);
+ 
+diff --git a/source/arm9/lwip/netif.c b/source/arm9/lwip/netif.c
+index 35c49cb..a1bc0ad 100644
+--- a/source/arm9/lwip/netif.c
++++ b/source/arm9/lwip/netif.c
+@@ -92,6 +92,35 @@ static err_t dswifi_link_output(struct netif *netif, struct pbuf *p)
+     }
+ }
+ 
++// dspico-romm: header and payload in separate buffers (see rx_tx.c).
++void dswifi_send_eth_to_lwip(const void *hdr, u32 hdr_len, const void *payload, u32 len)
++{
++    struct pbuf *p = pbuf_alloc(PBUF_IP, hdr_len + len, PBUF_POOL);
++    if (!p)
++        return;
++
++    if (pbuf_take(p, hdr, hdr_len) != ERR_OK ||
++        pbuf_take_at(p, payload, len, hdr_len) != ERR_OK)
++    {
++        pbuf_free(p);
++        return;
++    }
++
++    if (dswifi_netif.input(p, &dswifi_netif) != ERR_OK)
++        pbuf_free(p);
++}
++
++// dspico-romm: the MTU decides the TCP MSS lwIP advertises on new connections.
++void dswifi_set_mtu(u16 mtu)
++{
++    dswifi_netif.mtu = mtu;
++}
++
++u16 dswifi_get_mtu(void)
++{
++    return dswifi_netif.mtu;
++}
++
+ void dswifi_send_data_to_lwip(void *data, u32 len)
+ {
+     // pbuf_alloc(xx, xx, PBUF_POOL) returns a list of pbuf structs. We need to
+diff --git a/source/arm9/lwip/rx_tx.c b/source/arm9/lwip/rx_tx.c
+index dedeea5..bfac7cc 100644
+--- a/source/arm9/lwip/rx_tx.c
++++ b/source/arm9/lwip/rx_tx.c
+@@ -320,17 +320,17 @@ TWL_CODE static void Wifi_TWL_SendPacketToLwip(u8 *packet, size_t size)
+     memcpy(&eth_hdr.src_mac[0], mbox_hdr->src_mac, 6);
+     eth_hdr.ether_type = mbox_hdr->ether_type;
+ 
+-    // Overwrite MBOX header with Ethernet header before sending it to lwIP
+-
+-    void *lwip_buffer = (u8*)packet + sizeof(mbox_hdr_rx_data_packet)
+-                      - sizeof(EthernetFrameHeader);
+-
+-    memcpy(lwip_buffer, &eth_hdr, sizeof(EthernetFrameHeader));
+-
+-    size_t lwip_buffer_size = size - sizeof(mbox_hdr_rx_data_packet)
+-                            + sizeof(EthernetFrameHeader);
+-
+-    dswifi_send_data_to_lwip(lwip_buffer, lwip_buffer_size);
++    // dspico-romm: read the payload through the data cache instead of the
++    // uncached mirror (cache line fills are several times faster than
++    // uncached word reads), and never write into the shared ring: the
++    // Ethernet header is copied into the pbuf separately. The ring is only
++    // ever written by the ARM7 and read here, so its cache lines are always
++    // clean and invalidating them cannot lose data.
++    const u8 *payload = (const u8 *)memCached(packet + sizeof(mbox_hdr_rx_data_packet));
++    size_t payload_size = size - sizeof(mbox_hdr_rx_data_packet);
++    DC_InvalidateRange(payload, payload_size);
++
++    dswifi_send_eth_to_lwip(&eth_hdr, sizeof(EthernetFrameHeader), payload, payload_size);
+ }
+ 
+ void Wifi_SendPacketToLwip(u8 *packet, size_t size)
