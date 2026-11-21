@@ -79,7 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
-| 0.19 | ? | ? | zero-copy TLS records (tlsrx.c), Wi-Fi reconnect, watchdog limited to idle sockets |
+| 0.19 | 703 (zc TLS) / 729 (Mbed TLS) | 801 / 795 | zero-copy TLS records (tlsrx.c), Wi-Fi reconnect, watchdog limited to idle sockets |
 | 0.18 | 739 dl | 791 dl | Wi-Fi link lost during the test (no packets from the ARM7, DNS failed afterwards) |
 | 0.17 | 754 dl / 735 curl | **835** dl / 700 curl | yield after each TLS record (+15 % to SD vs 724 without) |
 | 0.16 | 639 dl / 792 curl | 793 dl / 687 curl | 93 KB scaled window tested: slower in all 4 tests (439-630), dropped |
