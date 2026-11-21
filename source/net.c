@@ -14,6 +14,7 @@
 
 #include "log.h"
 #include "prof.h"
+#include "sdwriter.h"
 
 // Provided by DSWiFi's lwIP port: 1 ms tick counter driven by a hardware timer.
 extern uint32_t sys_now(void);
@@ -181,6 +182,7 @@ typedef struct
     CURL *h;
     buf_t *mem;
     FILE *fp;
+    sdwriter_t *sdw;
     net_progress_fn cb;
     void *cb_ctx;
     uint32_t start_ms;
@@ -265,6 +267,14 @@ static size_t write_cb(char *data, size_t size, size_t nmemb, void *userp)
     {
         // JSON responses are kept in RAM; cap them to protect the heap.
         if (x->mem->len + len > 4 * 1024 * 1024 || !buf_append(x->mem, data, len))
+        {
+            x->write_failed = true;
+            return 0;
+        }
+    }
+    else if (x->sdw)
+    {
+        if (!sdw_write(x->sdw, data, len))
         {
             x->write_failed = true;
             return 0;
@@ -453,6 +463,17 @@ bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *f
     snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)first,
              (unsigned long long)last);
     xfer_t x = { .fp = fp, .cb = cb, .cb_ctx = ctx, .res = res };
+    return perform(path, NULL, true, false, range, &x);
+}
+
+bool net_download_range_async(const char *path, uint64_t first, uint64_t last,
+                              sdwriter_t *sdw, net_progress_fn cb, void *ctx,
+                              net_result_t *res)
+{
+    char range[48];
+    snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)first,
+             (unsigned long long)last);
+    xfer_t x = { .sdw = sdw, .cb = cb, .cb_ctx = ctx, .res = res };
     return perform(path, NULL, true, false, range, &x);
 }
 

@@ -24,6 +24,7 @@
 #include "log.h"
 #include "net.h"
 #include "prof.h"
+#include "sdwriter.h"
 
 #define NET_TEST_BYTES (8u * 1024 * 1024)
 #define CRYPTO_BYTES   (256u * 1024)
@@ -372,6 +373,70 @@ static bool run_net_sd(const config_t *cfg, const char *path, uint64_t len,
     return r.curl_code != 42; // CURLE_ABORTED_BY_CALLBACK: user pressed B
 }
 
+// Like run_net_sd, but SD writes run in a background cothread while the main
+// thread waits for the network.
+static bool run_net_sd_async(const config_t *cfg, const char *path, uint64_t len,
+                             net_row_t *row)
+{
+    const char *label = "SD async";
+    log_printf("%s...\n", label);
+
+    char dir[CFG_PATH_MAX + 16], file[CFG_PATH_MAX + 48];
+    config_path(cfg, "test", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    snprintf(file, sizeof(file), "%s/dlbench.bin", dir);
+
+    memset(row, 0, sizeof(*row));
+    row->label = label;
+
+    FILE *f = fopen(file, "wb");
+    if (!f)
+    {
+        log_printf("  can't create %s\n", file);
+        return true;
+    }
+    setvbuf(f, NULL, _IONBF, 0); // The writer already writes in chunks
+    if (!sd_preallocate(f, len))
+        log_printf("  preallocation failed\n");
+
+    sdwriter_t *w = sdw_open(f, 1024 * 1024, 32 * 1024);
+    if (!w)
+    {
+        log_printf("  writer init failed\n");
+        fclose(f);
+        remove(file);
+        return true;
+    }
+
+    net_wifi_stats_t st;
+    net_wifi_stats(&st);
+    net_result_t r;
+    prof_reset();
+    bool ok = net_download_range_async(path, 0, len - 1, w, net_progress, NULL, &r);
+    // Count the time to drain the ring: the download isn't done before that.
+    uint64_t t0 = prof_ticks();
+    uint64_t stall_ticks = sdw_stall_ticks(w);
+    bool wok = sdw_close(w); // Drains the ring, then frees the writer
+    uint32_t drain_ms = prof_ticks_to_ms(prof_ticks() - t0);
+    fclose(f);
+    stats_delta(row, &st);
+    remove(file);
+    printf("\x1b[22;0H                    \n");
+
+    uint32_t total_ms = r.total_ms + drain_ms;
+    prof_fill(row, total_ms);
+    row->sd_pct = 0; // SD time overlaps the wait; reported separately below
+    row->ok = ok && wok && r.body_bytes == len && r.status == 206;
+    row->raw_kbps = kbps(r.body_bytes, total_ms);
+    row->steady_kbps = row->raw_kbps;
+    log_printf("  ring full %lu ms, drain %lu ms\n",
+               (unsigned long)prof_ticks_to_ms(stall_ticks),
+               (unsigned long)drain_ms);
+    if (!row->ok)
+        log_printf("  FAILED: %s\n", r.error[0] ? r.error : "write/short/bad status");
+    return r.curl_code != 42;
+}
+
 void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
                      uint64_t rom_size)
 {
@@ -398,7 +463,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_crypto(&chacha, &gcm);
     sd = bench_sd(cfg);
 
-    net_row_t rows[6];
+    net_row_t rows[7];
     int nrows = 0;
     // Parallel connections were shown to be slower; keep 1 and 2 only.
     const char *labels[2] = { "HTTPS x1", "HTTPS x2" };
@@ -411,6 +476,8 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
         go = run_net_sd(cfg, path, len, 32 * 1024, "SD 32K", &rows[nrows++]);
     if (go)
         go = run_net_sd(cfg, path, len, 256 * 1024, "SD 256K", &rows[nrows++]);
+    if (go)
+        go = run_net_sd_async(cfg, path, len, &rows[nrows++]);
 
     if (go && cfg->http_url[0])
         go = run_net("HTTP  x1", cfg->http_url, path, len, 1, &rows[nrows++]);

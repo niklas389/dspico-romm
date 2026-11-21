@@ -79,6 +79,12 @@ bool net_download_parallel(const char *base_url, const char *path,
 bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *fp,
                         net_progress_fn cb, void *ctx, net_result_t *res);
 
+// Same, but the body goes through a background SD writer (see sdwriter.h).
+struct sdwriter;
+bool net_download_range_async(const char *path, uint64_t first, uint64_t last,
+                              struct sdwriter *sdw, net_progress_fn cb, void *ctx,
+                              net_result_t *res);
+
 // DSWiFi ARM7 -> ARM9 queue counters (cumulative since Wi-Fi init).
 typedef struct
 {
