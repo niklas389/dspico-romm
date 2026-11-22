@@ -102,6 +102,7 @@ void ui_draw_splash_top(uint16_t *fb, const char *version, const char *line);
 #define UI_TILE_ON_SD   1
 #define UI_TILE_DIMMED  2
 #define UI_TILE_WARN    4
+#define UI_TILE_BG      8   // Image on a rounded panel (platform icons)
 
 typedef struct
 {

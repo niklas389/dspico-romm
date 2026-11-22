@@ -5,9 +5,11 @@
 #include "download.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -234,6 +236,7 @@ bool download_rom(const config_t *cfg, int rom_id, const char *fs_name, uint64_t
     if (offset >= size)
     {
         remove(res->path); // Replace an older copy
+        download_cache_invalidate();
         if (rename(part, res->path) == 0)
             res->ok = true;
         else
@@ -292,6 +295,99 @@ bool download_local_name(const char *folder, const char *fs_name, int i,
     return true;
 }
 
+// File name stem reduced to lower-case letters and digits (accents folded),
+// e.g. "Pokémon - White (USA, Europe)" -> "pokemonwhiteusaeurope"
+void download_norm_stem(const char *name, char *out, int len)
+{
+    const char *dot = strrchr(name, '.');
+    const unsigned char *p = (const unsigned char *)name;
+    int n = 0;
+    while (*p && (!dot || (const char *)p < dot) && n < len - 1)
+    {
+        unsigned c = *p++;
+        if (c == 0xC3 && *p)
+        {
+            unsigned d = *p++ | 0x20;
+            c = (d >= 0xA0 && d <= 0xA5) ? 'a' : d == 0xA7 ? 'c'
+              : (d >= 0xA8 && d <= 0xAB) ? 'e' : (d >= 0xAC && d <= 0xAF) ? 'i'
+              : d == 0xB1 ? 'n' : ((d >= 0xB2 && d <= 0xB6) || d == 0xB8) ? 'o'
+              : (d >= 0xB9 && d <= 0xBC) ? 'u' : 0;
+        }
+        else if (c >= 'A' && c <= 'Z')
+            c |= 0x20;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            out[n++] = (char)c;
+    }
+    out[n] = 0;
+}
+
+static bool is_rom_ext(const char *name)
+{
+    static const char *ext[] = { "nds", "dsi", "srl", "gba", "gbc", "gb" };
+    const char *dot = strrchr(name, '.');
+    if (!dot)
+        return false;
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (strcasecmp(dot + 1, ext[i]) == 0)
+            return true;
+    return false;
+}
+
+// ROM files of one folder with their normalized stems (fallback lookup).
+// Rebuilt when another folder is asked for or after a download.
+static struct
+{
+    char folder[32];
+    int count;
+    char (*name)[256];
+    char (*stem)[96];
+    bool valid;
+} dircache;
+
+void download_cache_invalidate(void)
+{
+    dircache.valid = false;
+}
+
+static void dircache_load(const config_t *cfg, const char *folder)
+{
+    if (dircache.valid && strcmp(dircache.folder, folder) == 0)
+        return;
+    free(dircache.name);
+    free(dircache.stem);
+    memset(&dircache, 0, sizeof(dircache));
+    snprintf(dircache.folder, sizeof(dircache.folder), "%s", folder);
+    dircache.valid = true;
+    char path[CFG_PATH_MAX + 64];
+    download_target(cfg, folder, "", path, sizeof(path));
+    DIR *d = opendir(path);
+    if (!d)
+        return;
+    int cap = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+    {
+        if (de->d_name[0] == '.' || !is_rom_ext(de->d_name) || strlen(de->d_name) > 255)
+            continue;
+        if (dircache.count == cap)
+        {
+            cap = cap ? cap * 2 : 32;
+            void *a = realloc(dircache.name, cap * sizeof(*dircache.name));
+            if (!a)
+                break;
+            dircache.name = a;
+            void *b = realloc(dircache.stem, cap * sizeof(*dircache.stem));
+            if (!b)
+                break;
+            dircache.stem = b;
+        }
+        snprintf(dircache.name[dircache.count], 256, "%s", de->d_name);
+        download_norm_stem(de->d_name, dircache.stem[dircache.count], 96);
+        dircache.count++;
+    }
+    closedir(d);
+}
+
 bool download_local(const config_t *cfg, const char *folder, const char *fs_name,
                     char *name, int name_len, uint64_t *size)
 {
@@ -305,6 +401,21 @@ bool download_local(const config_t *cfg, const char *folder, const char *fs_name
             return true;
         }
     }
+    // Same name apart from punctuation, case and accents, e.g. a ROM unpacked
+    // or copied as "(USA, Europe)" while RomM has "(USA Europe)"
+    char st[96];
+    download_norm_stem(fs_name, st, sizeof(st));
+    if (!st[0])
+        return false;
+    dircache_load(cfg, folder);
+    for (int i = 0; i < dircache.count; i++)
+        if (strcmp(st, dircache.stem[i]) == 0 &&
+            download_exists(cfg, folder, dircache.name[i], size))
+        {
+            if (name)
+                snprintf(name, name_len, "%s", dircache.name[i]);
+            return true;
+        }
     return false;
 }
 
@@ -441,6 +552,7 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
     if (ok)
     {
         remove(res->path); // Replace an older copy
+        download_cache_invalidate();
         if (rename(part, res->path) == 0)
         {
             res->ok = true;

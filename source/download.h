@@ -72,7 +72,12 @@ bool download_is_archive(const char *fs_name);
 bool download_local_name(const char *folder, const char *fs_name, int i,
                          char *out, int out_len);
 
-// Finds the library copy of a RomM file (archive aware). name may be NULL.
+// Forget the cached folder listing used by download_local's fallback
+void download_cache_invalidate(void);
+void download_norm_stem(const char *name, char *out, int len);
+
+// Finds the library copy of a RomM file (archive aware), also under a name
+// that differs only in punctuation, case or accents. name may be NULL.
 bool download_local(const config_t *cfg, const char *folder, const char *fs_name,
                     char *name, int name_len, uint64_t *size);
 

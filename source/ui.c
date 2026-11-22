@@ -138,7 +138,9 @@ static void tile(uint16_t *fb, int x, int y, int w, int h, const char *label,
             dw = iw * h / ih;
         }
         int rr = r * dw / (w > 0 ? w : 1);
-        gfx_blit(fb, x + (w - dw) / 2, y + (h - dh), dw, dh, img, iw, ih, rr > 2 ? rr : 2);
+        // Strip art stands on the baseline; icons (r == 0) are centred
+        int oy = r ? h - dh : (h - dh) / 2;
+        gfx_blit(fb, x + (w - dw) / 2, y + oy, dw, dh, img, iw, ih, rr > 2 ? rr : 2);
         return;
     }
     gfx_rrect(fb, x, y, w, h, r, color, 0, 0);
@@ -293,7 +295,10 @@ void ui_draw_platform_top(uint16_t *fb, const ui_platform_t *p)
     ui_top_header(fb, "RomM", p->clock);
 
     if (p->icon)
-        tile(fb, 16, 32, 80, 80, p->label, 0, p->icon, p->icon_w, p->icon_h, 0);
+    {
+        gfx_rrect(fb, 15, 31, 82, 82, 13, UI_PANEL, UI_LINE, 1);
+        tile(fb, 25, 41, 62, 62, p->label, 0, p->icon, p->icon_w, p->icon_h, 0);
+    }
     else
     {
         gfx_rrect(fb, 15, 31, 82, 82, 13, UI_LINE, 0, 0);
@@ -355,7 +360,16 @@ static void strip_tile(uint16_t *fb, const ui_tile_t *t, int off_q8)
     if (x > GFX_W || x + size < 0)
         return;
     int r = size / 6;
-    tile(fb, x, y, size, size, t->label, t->color, t->img, t->img_w, t->img_h, r);
+    if ((t->flags & UI_TILE_BG) && t->img)
+    {
+        // Icon on a panel, so it doesn't float on the background
+        int pad = size / 8;
+        gfx_rrect(fb, x, y, size, size, r, UI_PANEL, UI_LINE, 1);
+        tile(fb, x + pad, y + pad, size - 2 * pad, size - 2 * pad, t->label, t->color, t->img,
+             t->img_w, t->img_h, 0);
+    }
+    else
+        tile(fb, x, y, size, size, t->label, t->color, t->img, t->img_w, t->img_h, r);
     if (t->flags & UI_TILE_DIMMED)
         gfx_shade(fb, x, y, size, size, UI_BG, 150);
     if (t->flags & UI_TILE_ON_SD)

@@ -2183,7 +2183,7 @@ static void browse_platform(int platform_id, const char *platform_name,
         if (sel >= g.idx.count)
             sel = g.idx.count - 1;
         int pos = sel * 256, idle = 0, shown = -1, cover_for = -1, seen_fetched = 0;
-        int save_shown = -1;
+        int save_shown = -1, summary_for = -1;
         bool leave = false, offline = false;
         u16 pending = 0; // Key held back until the background update is taken
         static char summary[600];
@@ -2244,41 +2244,44 @@ static void browse_platform(int platform_id, const char *platform_name,
             if (shown != sel)
             {
                 summary[0] = 0;
+                summary_for = -1;
+                cover_for = -1;
                 game_top(&g, sel, NULL, NULL);
                 shown = sel;
                 idle = 0;
             }
-            else if (++idle == 3 && g.covp[sel] == COV_CACHED)
+            else
             {
-                // Cover after 50 ms of rest (an SD read would slow fast scrolling)
-                if (cover_load(&g_cfg, platform_id, e->id, COV_TOP, top_cover, &g_top_cover_w,
-                               &g_top_cover_h))
-                    cover_for = sel;
-                game_top(&g, sel, NULL, cover_for == sel ? top_cover : NULL);
-            }
-            else if (idle == 12)
-            {
-                game_summary(e->id, summary, sizeof(summary), NULL, 0);
-                save_shown = g.save[sel];
-                game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
-            }
-            else if (idle > 12 && g.save[sel] != save_shown)
-            {
-                // The background thread has the save status (hashing the save
-                // here would stall the strip for a few hundred ms)
-                save_shown = g.save[sel];
-                games_tiles(&g, sel);
-                game_top(&g, sel, summary, cov_img);
-            }
-            else if (idle > 12 && cover_for != sel && g.covp[sel] == COV_CACHED)
-            {
-                // The cover arrived while the selection rests
-                if (cover_load(&g_cfg, platform_id, e->id, COV_TOP, top_cover, &g_top_cover_w,
-                               &g_top_cover_h))
-                    cover_for = sel;
-                else
-                    g.covp[sel] = COV_NONE; // Try once
-                game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
+                // SD reads and top screen redraws only once the strip stands
+                // still: during the animation they made it stop and jump
+                idle++;
+                bool still = pos == sel * 256;
+                if (still && idle >= 3 && cover_for != sel && g.covp[sel] == COV_CACHED)
+                {
+                    // Cover (also when it arrives later while resting)
+                    if (cover_load(&g_cfg, platform_id, e->id, COV_TOP, top_cover,
+                                   &g_top_cover_w, &g_top_cover_h))
+                        cover_for = sel;
+                    else
+                        g.covp[sel] = COV_NONE; // Try once
+                    game_top(&g, sel, summary[0] ? summary : NULL,
+                             cover_for == sel ? top_cover : NULL);
+                }
+                else if (still && idle >= 12 && summary_for != sel)
+                {
+                    summary_for = sel;
+                    game_summary(e->id, summary, sizeof(summary), NULL, 0);
+                    save_shown = g.save[sel];
+                    game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
+                }
+                else if (summary_for == sel && g.save[sel] != save_shown)
+                {
+                    // The background thread has the save status (hashing the
+                    // save here would stall the strip for a few hundred ms)
+                    save_shown = g.save[sel];
+                    games_tiles(&g, sel);
+                    game_top(&g, sel, summary, cov_img);
+                }
             }
             if (cw_running)
             {
@@ -2541,7 +2544,7 @@ static void step_platforms(void)
                 continue;
             tiles[n] = (ui_tile_t){ pl[i].name, pl[i].label, ui_name_color(pl[i].name),
                                     pl[i].icon, pl[i].icon_w, pl[i].icon_h,
-                                    (uint8_t)(hid ? UI_TILE_DIMMED : 0) };
+                                    (uint8_t)((hid ? UI_TILE_DIMMED : 0) | UI_TILE_BG) };
             map[n++] = i;
         }
         if (sel >= n)
