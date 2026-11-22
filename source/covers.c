@@ -201,8 +201,12 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
         log_printf("[Cover] %d %s: HTTP %ld / %ld\n", e->id, ext_img_k(kind), st[0], st[1]);
         // Nothing usable (404, not decodable): don't ask again. Server or
         // network errors are retried in a later session.
-        bool final = (st[0] == 404 || st[0] == 415 || st[0] == 0) &&
-                     (st[1] == 404 || st[1] == 415 || st[1] == 0);
+        // Status 0 means "not tried" only for an empty source path; a
+        // network error (no HTTP status) is never final
+        bool final = true;
+        for (int k = 0; k < 2; k++)
+            if (src[k][0] && st[k] != 404 && st[k] != 415)
+                final = false;
         if (final)
         {
             char dir[CFG_PATH_MAX + 32];

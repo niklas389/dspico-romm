@@ -16,6 +16,7 @@
 #include <mbedtls/md5.h>
 #include <nds.h>
 #include <dswifi9.h>
+#include <nds.h>
 
 #include "download.h"
 #include "log.h"
@@ -67,6 +68,39 @@ static void md5_hex(const void *data, size_t len, char out[33])
     mbedtls_md5(data, len, d);
     for (int i = 0; i < 16; i++)
         snprintf(out + 2 * i, 3, "%02x", d[i]);
+}
+
+// MD5 of a file read in 16 KB pieces, yielding to the other threads after
+// each (the save status is computed by a background thread while the UI runs)
+static bool file_md5(const char *path, char out[33], size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    static uint8_t buf[16 * 1024];
+    mbedtls_md5_context c;
+    mbedtls_md5_init(&c);
+    mbedtls_md5_starts(&c);
+    size_t n, total = 0;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+    {
+        mbedtls_md5_update(&c, buf, n);
+        total += n;
+        cothread_yield();
+        if (total > SAVE_MAX)
+            break;
+    }
+    bool ok = !ferror(f) && total <= SAVE_MAX;
+    fclose(f);
+    unsigned char d[16];
+    mbedtls_md5_finish(&c, d);
+    mbedtls_md5_free(&c);
+    if (!ok)
+        return false;
+    for (int i = 0; i < 16; i++)
+        snprintf(out + 2 * i, 3, "%02x", d[i]);
+    *len = total;
+    return true;
 }
 
 static bool read_file(const char *path, uint8_t **data, size_t *len)
@@ -349,15 +383,12 @@ void ss_status(const config_t *cfg, const rom_entry_t *e, const char *folder,
     struct stat sb;
     if (stat(st->local_path, &sb) == 0)
     {
-        uint8_t *data;
         size_t len;
-        if (read_file(st->local_path, &data, &len))
+        if (file_md5(st->local_path, st->local_hash, &len))
         {
             st->have_local = true;
             st->local_size = (uint32_t)len;
             st->local_mtime = sb.st_mtime;
-            md5_hex(data, len, st->local_hash);
-            free(data);
         }
     }
 

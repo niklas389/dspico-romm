@@ -1825,17 +1825,6 @@ static void game_page(games_t *g, int sel)
     }
 }
 
-// Save status of one game from the platform's server list (no network)
-static void games_save_status(games_t *g, int sel)
-{
-    if (g->save[sel] >= 0 || !g->on_sd[sel] || !save_capable(g->folder) || !g->have_srv)
-        return;
-    ss_status_t st;
-    ss_status(&g_cfg, &g->idx.e[sel], g->folder, &g->srv, &st);
-    g->save[sel] = (signed char)st.action;
-    games_tiles(g, sel);
-}
-
 // Background update of the game list and the platform's save list, so the
 // strip shows the index from the SD card right away. Network calls of the
 // main thread wait for it first (one curl handle).
@@ -1912,6 +1901,7 @@ typedef struct
     games_t *g;
     volatile int focus;
     volatile bool resting;
+    volatile bool settled;   // Selection rests briefly: save status may be computed
     volatile bool pause, stop;
     volatile bool busy, exited;
     volatile int fetched;    // Covers added (main reloads images when it changes)
@@ -1932,7 +1922,16 @@ static int covw_thread(void *arg)
         w->busy = true;
         games_t *g = w->g;
         int n = g->idx.count, f = w->focus, pick = -1, kind = COV_TILE;
-        if (!g->cov_scanned)
+        if (w->settled && f < n && g->save[f] < 0 && g->on_sd[f] && g->have_srv &&
+            save_capable(g->folder))
+        {
+            // Save status of the selected game: hashes the save (yields)
+            ss_status_t st;
+            ss_status(&g_cfg, &g->idx.e[f], g->folder, &g->srv, &st);
+            g->save[f] = (signed char)st.action;
+            pick = -2;
+        }
+        else if (!g->cov_scanned)
         {
             // One read of the platform's cover folder for all states
             cover_scan(&g_cfg, g->platform_id, g->idx.e, n, g->cov, g->covp);
@@ -2057,10 +2056,13 @@ static void art_bulk(games_t *g)
         cover_scan(&g_cfg, g->platform_id, g->idx.e, n, g->cov, g->covp);
         g->cov_scanned = true;
     }
+    // Also retries games marked "no artwork": earlier versions could mark
+    // them after a network error
+#define BULK_TODO(v) ((v) == COV_MISSING || (v) == COV_FAILED || (v) == COV_NONE)
     int total = 0;
     for (int i = 0; i < n; i++)
-        total += (g->cov[i] == COV_MISSING || g->cov[i] == COV_FAILED) +
-                 (g->covp[i] == COV_MISSING || g->covp[i] == COV_FAILED);
+        if (g->idx.e[i].cover && g->idx.e[i].cover[0])
+            total += BULK_TODO(g->cov[i]) + BULK_TODO(g->covp[i]);
     if (total == 0)
     {
         message(UI_OK, "All artwork is on the SD card", NULL, NULL);
@@ -2074,7 +2076,7 @@ static void art_bulk(games_t *g)
         for (int kind = COV_TILE; kind <= COV_TOP && !cancel; kind++)
         {
             uint8_t *st = kind == COV_TILE ? &g->cov[i] : &g->covp[i];
-            if (*st != COV_MISSING && *st != COV_FAILED)
+            if (!BULK_TODO(*st) || !g->idx.e[i].cover || !g->idx.e[i].cover[0])
                 continue;
             char l1[48], l2[64];
             snprintf(l1, sizeof(l1), "%d / %d images", done, total);
@@ -2181,6 +2183,7 @@ static void browse_platform(int platform_id, const char *platform_name,
         if (sel >= g.idx.count)
             sel = g.idx.count - 1;
         int pos = sel * 256, idle = 0, shown = -1, cover_for = -1, seen_fetched = 0;
+        int save_shown = -1;
         bool leave = false, offline = false;
         u16 pending = 0; // Key held back until the background update is taken
         static char summary[600];
@@ -2221,6 +2224,8 @@ static void browse_platform(int platform_id, const char *platform_name,
                     idx_free(&bg.idx);
                 if (bg.have_srv)
                 {
+                    if (cw_running)
+                        covw_pause(&cw);
                     if (g.have_srv)
                         ss_list_free(&g.srv);
                     g.srv = bg.srv;
@@ -2254,14 +2259,15 @@ static void browse_platform(int platform_id, const char *platform_name,
             else if (idle == 12)
             {
                 game_summary(e->id, summary, sizeof(summary), NULL, 0);
-                games_save_status(&g, sel);
+                save_shown = g.save[sel];
                 game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
             }
-            else if (idle > 12 && g.save[sel] < 0 && g.have_srv && g.on_sd[sel] &&
-                     save_capable(folder))
+            else if (idle > 12 && g.save[sel] != save_shown)
             {
-                // The save list arrived after the selection came to rest
-                games_save_status(&g, sel);
+                // The background thread has the save status (hashing the save
+                // here would stall the strip for a few hundred ms)
+                save_shown = g.save[sel];
+                games_tiles(&g, sel);
                 game_top(&g, sel, summary, cov_img);
             }
             else if (idle > 12 && cover_for != sel && g.covp[sel] == COV_CACHED)
@@ -2278,6 +2284,7 @@ static void browse_platform(int platform_id, const char *platform_name,
             {
                 cw.focus = sel;
                 cw.resting = idle > 30;
+                cw.settled = idle > 8;
                 (void)seen_fetched;
                 // Strip images: one SD read per frame, only when the strip
                 // stands still (no reads while scrolling)
