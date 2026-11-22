@@ -1,0 +1,246 @@
+diff --git a/source/arm7/twl/ath/wmi.twl.c b/source/arm7/twl/ath/wmi.twl.c
+index 235bf92..7653273 100644
+--- a/source/arm7/twl/ath/wmi.twl.c
++++ b/source/arm7/twl/ath/wmi.twl.c
+@@ -118,6 +118,8 @@ static void wmi_handle_get_channel_list(u8 *pkt_data, u32 len)
+     WLOG_FLUSH();
+ 
+     device_num_channels = num_entries;
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_CHANNELS] = num_entries;
+ 
+     if (num_entries > 32)
+         num_entries = 32;
+@@ -144,6 +146,8 @@ static void wmi_handle_scan_complete(u8* pkt_data, u32 len)
+     WLOG_FLUSH();
+ #endif
+     wmi_is_scanning = false;
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_SCAN_DONE]++;
+ }
+ 
+ static int wifi_mhz_to_channel(unsigned int mhz)
+@@ -190,6 +194,18 @@ static void wmi_handle_bss_info(u8 *pkt_data, u32 len_)
+     wmi_bss_info_hdr *wmi_params = (void *)pkt_data;
+     wmi_bss_info_frame_hdr *wmi_frame_hdr = (void *)wmi_params->body;
+ 
++    if (WifiData) // dspico-romm: diagnostics
++    {
++        WifiData->a7_diag[DSPICO_A7D_BSS]++;
++        u32 v = WifiData->a7_diag[DSPICO_A7D_SNR];
++        u32 hi = v & 0xFF;
++        if (wmi_params->snr > hi)
++            hi = wmi_params->snr;
++        WifiData->a7_diag[DSPICO_A7D_SNR] = hi | ((u32)wmi_params->snr << 8);
++        if (wmi_params->snr < 0x10)
++            WifiData->a7_diag[DSPICO_A7D_BSS_LOWSNR]++;
++    }
++
+     // If the signal-to-noise ratio is too low ignore the message
+     if (wmi_params->snr < 0x10) // Maybe this is too low, should it be 0x18 or 0x20?
+         return;
+@@ -324,6 +340,7 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+         {
+             if (WifiData) // dspico-romm: for the log
+             {
++                WifiData->a7_diag[DSPICO_A7D_WMI_READY]++;
+                 u8 b[16] = { 0 };
+                 memcpy(b, pkt_data, len < 16 ? len : 16);
+                 WifiData->a7_info[DSPICO_A7I_WMI_LEN] = len;
+@@ -339,6 +356,7 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+         }
+         case WMI_REG_DOMAIN_EVENT:
+         {
++            WifiData->a7_diag[DSPICO_A7D_REGDOMAIN]++;
+             WLOG_PRINTF("T: REG_DOMAIN_EVENT %x\n", (unsigned int)*(u32*)pkt_data);
+             WLOG_FLUSH();
+ 
+@@ -361,6 +379,7 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+             break;
+         case WMI_CMD_ERROR_EVENT:
+         {
++            WifiData->a7_diag[DSPICO_A7D_ERRORS]++;
+             WLOG_PRINTF("T: CMD_ERROR_EVENT, 0x%x 0x%x\n", *(u16*)pkt_data, pkt_data[2]);
+             WLOG_FLUSH();
+ 
+@@ -385,6 +404,7 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+         }
+         case WMI_CONNECT_EVENT:
+         {
++            WifiData->a7_diag[DSPICO_A7D_CONN] += 1;
+             WLOG_PRINTF("T: CONNECT_EVENT (%u B)\n", (unsigned int)len);
+             WLOG_FLUSH();
+ 
+@@ -401,6 +421,12 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+         }
+         case WMI_DISCONNECT_EVENT:
+         {
++            {
++                u32 c = WifiData->a7_diag[DSPICO_A7D_CONN];
++                c = (c & 0xFF) | ((((c >> 8) + 1) & 0xFF) << 8) |
++                    ((u32)pkt_data[8] << 16);
++                WifiData->a7_diag[DSPICO_A7D_CONN] = c;
++            }
+             WLOG_PRINTF("T: DISCONNECT %u, %u\n", *(u16*)pkt_data,
+                         pkt_data[8]); // Disconnect reason
+             WLOG_PRINTF("T: BSSID %x:%x:%x:%x:%x:%x\n", pkt_data[2], pkt_data[3],
+@@ -423,6 +449,8 @@ void wmi_handle_pkt(u16 pkt_cmd, u8* pkt_data, u32 len, u32 ack_len)
+         case WMI_TARGET_ERROR_REPORT_EVENT:
+         {
+             u32 err_id = *(u32*)pkt_data;
++            WifiData->a7_diag[DSPICO_A7D_ERRORS] =
++                (WifiData->a7_diag[DSPICO_A7D_ERRORS] & 0xFFFF) | (err_id << 16);
+             WLOG_PRINTF("T: TARGET_ERROR_REPORT_EVENT 0x%x\n", (unsigned int)err_id);
+             WLOG_FLUSH();
+ 
+@@ -535,6 +563,8 @@ void wmi_start_scan(void)
+     };
+ 
+     wmi_is_scanning = true;
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_SCAN_START]++;
+ 
+     wmi_send_pkt(WMI_START_SCAN_CMD, MBOXPKT_REQACK, &wmi_params, sizeof(wmi_params));
+ }
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 0292472..3e9a4a6 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -1323,9 +1323,11 @@ static int wifi_card_wlan_init_bmi(void)
+     // SCFG_WL bit 0 (WL_OFFB) appears to be the module's power/enable line:
+     // switch it off, wait, and let the code below switch it on again.
+     bool hw_reset = WifiData && (WifiData->a7_opts & DSPICO_A7_OPT_HWRESET);
++    u32 scfg_wl = REG_SCFG_WL & 0xFF;
+     if (hw_reset)
+     {
+         REG_SCFG_WL = 0;
++        scfg_wl |= (u32)(REG_SCFG_WL & 0xFF) << 8;
+         swiDelay(20 * 134056); // Same scale as the 5 ms delay below
+     }
+ 
+@@ -1345,6 +1347,13 @@ static int wifi_card_wlan_init_bmi(void)
+     REG_SCFG_WL = SCFG_WL_OFFB; // SCFG_WL on?
+     if (hw_reset)
+         swiDelay(20 * 134056); // Let the module power up
++    if (WifiData) // dspico-romm: diagnostics
++    {
++        WifiData->a7_diag[DSPICO_A7D_SCFG_EXT] = REG_SCFG_EXT;
++        WifiData->a7_diag[DSPICO_A7D_SCFG_WL] =
++            scfg_wl | (u32)(REG_SCFG_WL & 0xFF) << 16;
++        WifiData->a7_diag[DSPICO_A7D_INIT_FLAGS] = 0;
++    }
+ 
+     ctx->tmio.bus_width = 4;
+     wifi_card_switch_device();
+@@ -1356,6 +1365,8 @@ static int wifi_card_wlan_init_bmi(void)
+     {
+         ctx->tmio.bus_width = 1;
+         wifi_card_switch_device();
++        if (WifiData)
++            WifiData->a7_diag[DSPICO_A7D_INIT_FLAGS] |= 2;
+         WLOG_PUTS("T: Can't read revision. Assuming 1bit bus\n");
+         WLOG_FLUSH();
+     }
+@@ -1396,8 +1407,12 @@ static int wifi_card_wlan_init_bmi(void)
+             {
+                 // CMD5 - IO_SEND_OP_COND
+                 wifi_card_send_command(cmd5, ocr);
++                if (WifiData)
++                    WifiData->a7_diag[DSPICO_A7D_INIT_FLAGS] += 0x100;
+                 if (ctx->tmio.status & 4)
+                 {
++                    if (WifiData)
++                        WifiData->a7_diag[DSPICO_A7D_INIT_FLAGS] |= 1;
+                     WLOG_PUTS("T: Skip opcond...\n");
+                     WLOG_FLUSH();
+                     goto skip_opcond;
+@@ -1540,6 +1555,8 @@ skip_opcond:
+         device_host_interest_addr = AR6002_HOST_INTEREST_ADDRESS;
+ 
+     unsigned int is_uploaded = wifi_card_read_intern_word(device_host_interest_addr + 0x58);
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_FW_UPLOADED] = is_uploaded;
+     if (!is_uploaded)
+     {
+         WLOG_PRINTF("T: Needs FW upload: %d\n", is_uploaded);
+@@ -1552,6 +1569,8 @@ skip_opcond:
+ 
+     // RESET_CAUSE, expecting 0x02
+     unsigned int reset_cause = wifi_card_read_intern_word(0x40C0);
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_RESET_CAUSE] = reset_cause;
+     if (reset_cause != 2)
+     {
+         WLOG_PRINTF("T: Reset cause: 0x%x\n", reset_cause);
+diff --git a/source/arm7/twl/setup.twl.c b/source/arm7/twl/setup.twl.c
+index f2cd02a..4156dce 100644
+--- a/source/arm7/twl/setup.twl.c
++++ b/source/arm7/twl/setup.twl.c
+@@ -13,6 +13,8 @@ void Wifi_TWL_Start(void)
+     WLOG_PUTS("T: Start\n");
+     WLOG_FLUSH();
+ 
++    if (WifiData) // dspico-romm: diagnostics
++        WifiData->a7_diag[DSPICO_A7D_STARTS]++;
+     wifi_card_init();
+ }
+ 
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index 22fd303..187e413 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -355,6 +355,14 @@ void Wifi_A7Info(u32 out[16])
+         out[i] = WifiData ? WifiData->a7_info[i] : 0;
+ }
+ 
++// dspico-romm: connect diagnostics (DSPICO_A7D_*). out[16] = curMode.
++void Wifi_A7Diag(u32 out[17])
++{
++    for (int i = 0; i < 16; i++)
++        out[i] = WifiData ? WifiData->a7_diag[i] : 0;
++    out[16] = WifiData ? (u32)WifiData->curMode : 0xFF;
++}
++
+ // dspico-romm: ARM7 breakdown counters (see arm7/twl/card.twl.c A7P_*).
+ void Wifi_Arm7Prof(u32 out[8])
+ {
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index 93a99ed..9ac3626 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -289,6 +289,8 @@ typedef struct WIFI_MAINSTRUCT
+     // about the Wi-Fi firmware and its receive path (DSPICO_A7I_*).
+     u32 a7_opts;
+     u32 a7_info[16];
++    // dspico-romm: connect diagnostics (DSPICO_A7D_*), counted by the ARM7
++    u32 a7_diag[16];
+ 
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+@@ -318,6 +320,26 @@ enum {
+     DSPICO_A7I_EAPOL,        // DMA path: EAPOL frames also handled on the ARM7
+ };
+ 
++// dspico-romm: WifiData->a7_diag[] indices (card init and scan stages)
++enum {
++    DSPICO_A7D_SCFG_EXT,     // REG_SCFG_EXT (ARM7) at card init
++    DSPICO_A7D_SCFG_WL,      // SCFG_WL: before | after off << 8 | after on << 16
++    DSPICO_A7D_INIT_FLAGS,   // 1: CMD5 skipped, 2: 1-bit bus; CMD5 loops << 8
++    DSPICO_A7D_FW_UPLOADED,  // Host interest "firmware uploaded" before reset
++    DSPICO_A7D_RESET_CAUSE,  // RESET_CAUSE after the soft reset (expect 2)
++    DSPICO_A7D_WMI_READY,    // WMI_READY_EVENT count
++    DSPICO_A7D_REGDOMAIN,    // WMI_REG_DOMAIN_EVENT count
++    DSPICO_A7D_CHANNELS,     // Channels in the channel list
++    DSPICO_A7D_SCAN_START,   // WMI_START_SCAN_CMD count
++    DSPICO_A7D_SCAN_DONE,    // WMI_SCAN_COMPLETE_EVENT count
++    DSPICO_A7D_BSS,          // WMI_BSS_INFO_EVENT count
++    DSPICO_A7D_BSS_LOWSNR,   // ... of these ignored (SNR < 0x10)
++    DSPICO_A7D_SNR,          // Highest SNR | last SNR << 8
++    DSPICO_A7D_ERRORS,       // CMD_ERROR count | last TARGET_ERROR id << 16
++    DSPICO_A7D_CONN,         // CONNECT count | DISCONNECT << 8 | reason << 16
++    DSPICO_A7D_STARTS,       // Card inits (Wifi_TWL_Start)
++};
++
+ // dspico-romm: DSi RX ring entry whose data was written by SDIO DMA. The
+ // size word then holds: bit 30 set, bits 16..27 the entry length in cache
+ // lines (from the size word to the next entry), bits 0..15 the data size.

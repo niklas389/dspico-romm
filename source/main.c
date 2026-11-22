@@ -242,6 +242,51 @@ static u32 a7_opts_base(void)
 }
 #endif
 
+#ifdef DSPICO_DSWIFI
+// Connect diagnostics from the patched ARM7 core (DSPICO_A7D_* in DSWiFi's
+// wifi_shared.h) plus the access points the scan found. Shows at which stage
+// a failed start stopped: card init, firmware, channel list, scan, connect.
+static void wifi_diag_log(void)
+{
+    extern void Wifi_A7Diag(u32 out[17]);
+    u32 d[17];
+    Wifi_A7Diag(d);
+    log_printf("  init: starts %lu, SCFG_EXT %08lX, SCFG_WL %02lX>%02lX>%02lX,"
+               " CMD5 x%lu%s%s\n",
+               (unsigned long)d[15], (unsigned long)d[0],
+               (unsigned long)(d[1] & 0xFF), (unsigned long)((d[1] >> 8) & 0xFF),
+               (unsigned long)((d[1] >> 16) & 0xFF), (unsigned long)(d[2] >> 8),
+               (d[2] & 1) ? " skipped" : "", (d[2] & 2) ? " 1-bit" : "");
+    log_printf("  fw: uploaded before %lX, reset cause %lX, ready %lu, regdomain %lu,"
+               " channels %lu\n",
+               (unsigned long)d[3], (unsigned long)d[4], (unsigned long)d[5],
+               (unsigned long)d[6], (unsigned long)d[7]);
+    log_printf("  scan: %lu started, %lu done, %lu BSS (%lu low SNR), SNR max %lu"
+               " last %lu, mode %lu\n",
+               (unsigned long)d[8], (unsigned long)d[9], (unsigned long)d[10],
+               (unsigned long)d[11], (unsigned long)(d[12] & 0xFF),
+               (unsigned long)((d[12] >> 8) & 0xFF), (unsigned long)d[16]);
+    log_printf("  conn: %lu connect, %lu disconnect (last reason %lu),"
+               " cmd errors %lu, target error %lX\n",
+               (unsigned long)(d[14] & 0xFF), (unsigned long)((d[14] >> 8) & 0xFF),
+               (unsigned long)(d[14] >> 16), (unsigned long)(d[13] & 0xFFFF),
+               (unsigned long)(d[13] >> 16));
+
+    static Wifi_AccessPoint aps[16];
+    int n = Wifi_GetNumAP(), k = 0;
+    for (int i = 0; i < n && k < 16; i++)
+        if (Wifi_GetAPData(i, &aps[k]) == WIFI_RETURN_OK)
+            k++;
+    Wifi_AccessPoint match;
+    int m = k ? Wifi_FindMatchingAP(k, aps, &match) : -1;
+    log_printf("  APs: %d listed, saved AP %s\n", n, m >= 0 ? "found" : "not found");
+    for (int i = 0; i < k && i < 8; i++)
+        log_printf("   %c ch %2u rssi %4d sec %u %.12s\n", i == m ? '*' : ' ',
+                   aps[i].channel, aps[i].rssi, (unsigned)aps[i].security_type,
+                   aps[i].ssid);
+}
+#endif
+
 // Waits up to ~20 s for the association, logging each state change.
 static bool wifi_wait_assoc(int attempt)
 {
@@ -270,6 +315,7 @@ static bool wifi_wait_assoc(int attempt)
                (unsigned long)a7[0],
                a7[0] == 0xFFFFFFFF ? " (module not answering)"
                : a7[0] == 0 ? " (module not initialized)" : "");
+    wifi_diag_log();
 #else
     log_printf("Wi-Fi: attempt %d failed\n", attempt);
 #endif
@@ -383,6 +429,7 @@ static void wifi_fw_log(void)
     log_printf("  WMI ready %lu B: %08lX %08lX %08lX %08lX\n", (unsigned long)a[4],
                (unsigned long)a[5], (unsigned long)a[6], (unsigned long)a[7],
                (unsigned long)a[8]);
+    wifi_diag_log(); // For comparison with failed starts
 }
 #endif
 
