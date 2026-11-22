@@ -11,9 +11,11 @@
 //
 // All results are printed on the bottom screen and written to romm/poc.log.
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -30,8 +32,8 @@
 #include "net.h"
 #include "prof.h"
 #include "qr.h"
+#include "romindex.h"
 
-#define ROMS_PER_PAGE 10
 #define LIST_ROWS     16
 
 static config_t g_cfg;
@@ -101,37 +103,52 @@ static void format_size(uint64_t bytes, char *out, size_t len)
         snprintf(out, len, "%luK", (unsigned long)(bytes >> 10));
 }
 
-// Returns the selected index, or -1 on B. L/R return -2/-3 for paging.
-static int menu(const char *title, const char **items, int count, int *cursor)
+#define MENU_BACK   -1
+#define MENU_X      -4
+#define MENU_SELECT -5
+#define MENU_Y      -6
+
+// Scrolling list. Returns the selected index or MENU_* for B/X/Y/SELECT.
+// L/R move a page. hint is the bottom line.
+static int menu_ex(const char *title, const char **items, int count, int *cursor,
+                   const char *hint)
 {
     int top = 0;
     while (1)
     {
+        if (*cursor >= count)
+            *cursor = count ? count - 1 : 0;
         if (*cursor < top)
             top = *cursor;
         if (*cursor >= top + LIST_ROWS)
             top = *cursor - LIST_ROWS + 1;
 
         consoleClear();
-        printf("%s\n", title);
+        printf("%.32s\n", title);
         printf("--------------------------------");
         for (int i = top; i < count && i < top + LIST_ROWS; i++)
             printf("%c%.30s\n", i == *cursor ? '>' : ' ', items[i]);
-        printf("\x1b[21;0HA:select B:back L/R:page");
+        printf("\x1b[21;0H%.32s", hint);
 
         u16 k = wait_key();
         if ((k & KEY_DOWN) && *cursor < count - 1)
             (*cursor)++;
         else if ((k & KEY_UP) && *cursor > 0)
             (*cursor)--;
-        else if (k & KEY_A)
+        else if (k & KEY_R)
+            *cursor = *cursor + LIST_ROWS < count ? *cursor + LIST_ROWS : count - 1;
+        else if (k & KEY_L)
+            *cursor = *cursor >= LIST_ROWS ? *cursor - LIST_ROWS : 0;
+        else if ((k & KEY_A) && count > 0)
             return *cursor;
         else if (k & KEY_B)
-            return -1;
-        else if (k & KEY_L)
-            return -2;
-        else if (k & KEY_R)
-            return -3;
+            return MENU_BACK;
+        else if (k & KEY_X)
+            return MENU_X;
+        else if (k & KEY_Y)
+            return MENU_Y;
+        else if (k & KEY_SELECT)
+            return MENU_SELECT;
     }
 }
 
@@ -464,118 +481,250 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
     press_any_key();
 }
 
-static void browse_platform(int platform_id, const char *platform_name,
-                            const char *folder)
-{
-    int offset = 0;
-    int cursor = 0;
+// --- Library views --------------------------------------------------------
 
+// Names of the files in <drive>/roms/<folder>/, sorted (for "on SD" marks).
+typedef struct
+{
+    char **names;
+    int count;
+} dir_list_t;
+
+static int cmp_str(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void dir_list_load(const char *folder, dir_list_t *d)
+{
+    memset(d, 0, sizeof(*d));
+    char path[CFG_PATH_MAX + 64];
+    download_target(&g_cfg, folder, "", path, sizeof(path));
+    DIR *dir = opendir(path);
+    if (!dir)
+        return;
+    int cap = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL)
+    {
+        if (de->d_name[0] == '.')
+            continue;
+        if (d->count == cap)
+        {
+            cap = cap ? cap * 2 : 64;
+            char **n = realloc(d->names, cap * sizeof(char *));
+            if (!n)
+                break;
+            d->names = n;
+        }
+        d->names[d->count] = strdup(de->d_name);
+        if (d->names[d->count])
+            d->count++;
+    }
+    closedir(dir);
+    qsort(d->names, d->count, sizeof(char *), cmp_str);
+}
+
+static bool dir_list_has(const dir_list_t *d, const char *name)
+{
+    return d->count &&
+           bsearch(&name, d->names, d->count, sizeof(char *), cmp_str) != NULL;
+}
+
+static void dir_list_free(dir_list_t *d)
+{
+    for (int i = 0; i < d->count; i++)
+        free(d->names[i]);
+    free(d->names);
+    memset(d, 0, sizeof(*d));
+}
+
+static void sync_progress(int fetched, int total)
+{
+    printf("\x1b[3;0H%d / %d ROMs        \n", fetched, total);
+}
+
+// Detail view of one ROM: metadata from the index, A downloads.
+static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
+{
     while (1)
     {
-        char path[256];
-        snprintf(path, sizeof(path),
-                 "/api/roms?platform_ids=%d&limit=%d&offset=%d"
-                 "&order_by=name&order_dir=asc",
-                 platform_id, ROMS_PER_PAGE, offset);
-
         consoleClear();
-        printf("Loading...\n");
+        char sz[16];
+        format_size(e->size, sz, sizeof(sz));
+        printf("%.96s\n\n", e->name);
+        if (e->year)
+            printf("Year:    %d\n", e->year);
+        if (e->genres[0])
+            printf("Genre:   %.23s\n", e->genres);
+        if (e->players[0])
+            printf("Players: %.23s\n", e->players);
+        if (e->regions[0])
+            printf("Region:  %.23s\n", e->regions);
+        printf("Size:    %s (.%s)\n", sz, e->ext);
 
-        buf_t body = { 0 };
-        net_result_t res;
-        bool ok = net_get(path, true, &body, &res);
-        log_printf("\n[ROMs %s +%d]\n", platform_name, offset);
-        net_log_result("roms page", &res);
-        if (!ok || res.status != 200)
+        static char meta[2048];
+        if (idx_meta(&g_cfg, e->id, meta, sizeof(meta)))
         {
-            buf_free(&body);
-            press_any_key();
-            return;
+            char *pub = strstr(meta, "publisher=");
+            if (pub)
+                printf("Pub.:    %.23s\n", strtok(pub + 10, "\n"));
+            char *summary = strstr(pub ? pub + strlen(pub) + 1 : meta, "\n\n");
+            if (summary)
+                printf("\n%.160s\n", summary + 2);
         }
 
-        uint32_t t0 = net_now_ms();
-        cJSON *root = cJSON_Parse(body.data);
-        log_printf("  JSON parse %lu ms, %u B\n",
-                   (unsigned long)(net_now_ms() - t0), (unsigned)body.len);
-        buf_free(&body);
+        printf("\x1b[19;0H%s\n", *on_sd ? "On SD card" : "");
+        if (strcasecmp(e->ext, "zip") == 0 || strcasecmp(e->ext, "7z") == 0)
+            printf("(archive: not launchable)\n");
+        printf("\x1b[21;0HA:download Y:speed test B:back");
 
-        const cJSON *items = cJSON_GetObjectItemCaseSensitive(root, "items");
-        int total = (int)json_num(root, "total", 0);
-        int count = cJSON_GetArraySize(items);
-
-        if (count == 0)
-        {
-            cJSON_Delete(root);
-            printf("No ROMs.\n");
-            press_any_key();
-            return;
-        }
-
-        const char *labels[ROMS_PER_PAGE];
-        static char label_buf[ROMS_PER_PAGE][40];
-        for (int i = 0; i < count && i < ROMS_PER_PAGE; i++)
-        {
-            const cJSON *it = cJSON_GetArrayItem(items, i);
-            const char *name = json_str(it, "name");
-            if (!name)
-                name = json_str(it, "fs_name");
-            char sz[16];
-            format_size((uint64_t)json_num(it, "fs_size_bytes", 0), sz, sizeof(sz));
-            snprintf(label_buf[i], sizeof(label_buf[i]), "%-23.23s %6s",
-                     name ? name : "?", sz);
-            labels[i] = label_buf[i];
-        }
-
-        char title[64];
-        snprintf(title, sizeof(title), "%.18s %d-%d/%d", platform_name, offset + 1,
-                 offset + count, total);
-
-        if (cursor >= count)
-            cursor = count - 1;
-        int sel = menu(title, labels, count, &cursor);
-
-        if (sel == -1)
-        {
-            cJSON_Delete(root);
-            return;
-        }
-        if (sel == -2)
-        {
-            if (offset >= ROMS_PER_PAGE)
-                offset -= ROMS_PER_PAGE;
-            cJSON_Delete(root);
-            continue;
-        }
-        if (sel == -3)
-        {
-            if (offset + ROMS_PER_PAGE < total)
-                offset += ROMS_PER_PAGE;
-            cJSON_Delete(root);
-            continue;
-        }
-
-        const cJSON *it = cJSON_GetArrayItem(items, sel);
-        int rom_id = (int)json_num(it, "id", 0);
-        const char *fs_name = json_str(it, "fs_name");
-        uint64_t size = (uint64_t)json_num(it, "fs_size_bytes", 0);
-        char fs_name_copy[256];
-        snprintf(fs_name_copy, sizeof(fs_name_copy), "%s", fs_name ? fs_name : "rom.bin");
-        cJSON_Delete(root);
-
-        consoleClear();
-        bool on_sd = download_exists(&g_cfg, folder, fs_name_copy, NULL);
-        printf("%s\n%s\n\nA: download to roms/%s/\n"
-               "Y: speed test suite\nB: back\n",
-               label_buf[sel], on_sd ? "(on SD)" : "", folder);
         u16 k = wait_key();
+        if (k & KEY_B)
+            return;
         if (k & KEY_A)
-            download_to_library(rom_id, fs_name_copy, size, folder);
+        {
+            download_to_library(e->id, e->fs_name, e->size, folder);
+            *on_sd = download_exists(&g_cfg, folder, e->fs_name, NULL);
+        }
         else if (k & KEY_Y)
         {
-            bench_run_suite(&g_cfg, rom_id, fs_name_copy, size);
+            bench_run_suite(&g_cfg, e->id, e->fs_name, e->size);
             press_any_key();
         }
     }
+}
+
+static void browse_platform(int platform_id, const char *platform_name,
+                            const char *folder)
+{
+    rom_index_t idx;
+    idx_init(&idx, platform_id);
+    bool have = idx_load(&g_cfg, &idx);
+
+    bool full = false;
+    while (1)
+    {
+        // Bring the index up to date (incremental unless it is new or X)
+        if (full)
+        {
+            idx_free(&idx);
+            idx_init(&idx, platform_id);
+        }
+        consoleClear();
+        printf("%.24s\n%s index...\n", platform_name,
+               idx.count ? "Updating" : "Downloading");
+        idx_sync_result_t r;
+        bool ok = idx_sync(&g_cfg, &idx, sync_progress, &r);
+        log_printf("\n[Index %s] %s: %d fetched, %d removed, %d ROMs, %d req, %lu ms\n",
+                   platform_name, ok ? (r.full ? "full" : "update") : "FAILED",
+                   r.fetched, r.removed, idx.count, r.requests, (unsigned long)r.ms);
+        if (!ok)
+        {
+            log_printf("  %s\n", r.error);
+            if (!have && idx.count == 0)
+            {
+                press_any_key();
+                idx_free(&idx);
+                return;
+            }
+            log_printf("  showing the saved index\n");
+            press_any_key();
+        }
+        full = false;
+
+        if (idx.count == 0)
+        {
+            printf("No ROMs.\n");
+            press_any_key();
+            idx_free(&idx);
+            return;
+        }
+
+        dir_list_t onsd;
+        dir_list_load(folder, &onsd);
+
+        const char **labels = calloc(idx.count, sizeof(char *));
+        char (*label_buf)[40] = calloc(idx.count, sizeof(*label_buf));
+        bool *on_sd = calloc(idx.count, sizeof(bool));
+        if (!labels || !label_buf || !on_sd)
+        {
+            free(labels);
+            free(label_buf);
+            free(on_sd);
+            dir_list_free(&onsd);
+            idx_free(&idx);
+            return;
+        }
+        for (int i = 0; i < idx.count; i++)
+        {
+            const rom_entry_t *e = &idx.e[i];
+            on_sd[i] = dir_list_has(&onsd, e->fs_name);
+            char sz[16];
+            format_size(e->size, sz, sizeof(sz));
+            snprintf(label_buf[i], sizeof(label_buf[i]), "%c%-22.22s %6s",
+                     on_sd[i] ? '*' : ' ', e->name, sz);
+            labels[i] = label_buf[i];
+        }
+        dir_list_free(&onsd);
+
+        char title[48];
+        snprintf(title, sizeof(title), "%.20s (%d)", platform_name, idx.count);
+        int cursor = 0;
+        bool leave = false;
+        while (!leave)
+        {
+            int sel = menu_ex(title, labels, idx.count, &cursor,
+                              "A:open X:resync B:back *:on SD");
+            if (sel == MENU_BACK)
+                leave = true;
+            else if (sel == MENU_X)
+            {
+                full = true;
+                break;
+            }
+            else if (sel >= 0)
+            {
+                rom_detail(&idx.e[sel], folder, &on_sd[sel]);
+                label_buf[sel][0] = on_sd[sel] ? '*' : ' ';
+            }
+        }
+        free(labels);
+        free(label_buf);
+        free(on_sd);
+        if (leave)
+            break;
+    }
+    idx_free(&idx);
+}
+
+// Hidden platforms: <base>/hidden_platforms.txt, one platform id per line.
+static bool hidden_load(int *ids, int max, int *n)
+{
+    *n = 0;
+    char path[CFG_PATH_MAX + 32];
+    config_path(&g_cfg, "hidden_platforms.txt", path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    char line[32];
+    while (*n < max && fgets(line, sizeof(line), f))
+        if (atoi(line) > 0)
+            ids[(*n)++] = atoi(line);
+    fclose(f);
+    return true;
+}
+
+static void hidden_save(const int *ids, int n)
+{
+    char path[CFG_PATH_MAX + 32];
+    config_path(&g_cfg, "hidden_platforms.txt", path, sizeof(path));
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%d\n", ids[i]);
+    fclose(f);
 }
 
 static void step_platforms(void)
@@ -596,52 +745,83 @@ static void step_platforms(void)
     buf_free(&body);
     int count = cJSON_GetArraySize(root);
     log_printf("%d platforms\n", count);
-    press_any_key();
-
     if (count <= 0)
     {
         cJSON_Delete(root);
         return;
     }
 
-    const char **labels = calloc(count, sizeof(char *));
-    char (*label_buf)[40] = calloc(count, sizeof(*label_buf));
-    int *ids = calloc(count, sizeof(int));
-    char (*folders)[32] = calloc(count, sizeof(*folders));
-
+    typedef struct { int id, roms; char name[28]; char folder[32]; } plat_t;
+    plat_t *pl = calloc(count, sizeof(plat_t));
     for (int i = 0; i < count; i++)
     {
         const cJSON *p = cJSON_GetArrayItem(root, i);
         const char *name = json_str(p, "display_name");
         if (!name)
             name = json_str(p, "name");
-        ids[i] = (int)json_num(p, "id", 0);
-        snprintf(folders[i], sizeof(folders[i]), "%s",
+        pl[i].id = (int)json_num(p, "id", 0);
+        pl[i].roms = (int)json_num(p, "rom_count", 0);
+        snprintf(pl[i].name, sizeof(pl[i].name), "%s", name ? name : "?");
+        snprintf(pl[i].folder, sizeof(pl[i].folder), "%s",
                  download_folder(json_str(p, "slug"), json_str(p, "fs_slug")));
-        snprintf(label_buf[i], sizeof(label_buf[i]), "%-24.24s %5d",
-                 name ? name : "?", (int)json_num(p, "rom_count", 0));
-        labels[i] = label_buf[i];
     }
+    cJSON_Delete(root);
 
+    int hidden[64], n_hidden = 0;
+    hidden_load(hidden, 64, &n_hidden);
+    bool show_all = false;
+
+    const char **labels = calloc(count, sizeof(char *));
+    char (*label_buf)[40] = calloc(count, sizeof(*label_buf));
+    int *map = calloc(count, sizeof(int));
     int cursor = 0;
     while (1)
     {
-        int sel = menu("Platforms (B: quit)", labels, count, &cursor);
-        if (sel == -1)
+        int n = 0;
+        for (int i = 0; i < count; i++)
+        {
+            bool hid = false;
+            for (int j = 0; j < n_hidden; j++)
+                hid |= hidden[j] == pl[i].id;
+            if (hid && !show_all)
+                continue;
+            snprintf(label_buf[n], sizeof(label_buf[n]), "%c%-24.24s %5d",
+                     hid ? '-' : ' ', pl[i].name, pl[i].roms);
+            labels[n] = label_buf[n];
+            map[n++] = i;
+        }
+        int sel = menu_ex(show_all ? "Platforms (all)" : "Platforms", labels, n, &cursor,
+                          show_all ? "A:open SEL:hide/show Y:done" : "A:open Y:edit B:quit");
+        if (sel == MENU_BACK)
             break;
-        if (sel < 0)
+        if (sel == MENU_Y)
+        {
+            show_all = !show_all;
             continue;
-
-        char name[32];
-        snprintf(name, sizeof(name), "%.24s", label_buf[sel]);
-        browse_platform(ids[sel], name, folders[sel]);
+        }
+        if (sel == MENU_SELECT && show_all && n > 0)
+        {
+            int id = pl[map[cursor]].id, j;
+            for (j = 0; j < n_hidden && hidden[j] != id; j++)
+                ;
+            if (j < n_hidden)
+                hidden[j] = hidden[--n_hidden];
+            else if (n_hidden < 64)
+                hidden[n_hidden++] = id;
+            hidden_save(hidden, n_hidden);
+            continue;
+        }
+        if (sel >= 0)
+        {
+            const plat_t *p = &pl[map[sel]];
+            browse_platform(p->id, p->name, p->folder);
+        }
     }
 
     free(labels);
     free(label_buf);
-    free(ids);
-    free(folders);
-    cJSON_Delete(root);
+    free(map);
+    free(pl);
 }
 
 int main(int argc, char **argv)

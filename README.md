@@ -79,7 +79,8 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
-| 0.27 | – | – | ROM downloads into `/roms/<platform>/` (download.c) |
+| 0.28 | – | – | local ROM index, detail view, hideable platforms |
+| 0.27 | – | 951 (110 MB ROM, 1 request) | ROM downloads into `/roms/<platform>/` (download.c) |
 | 0.26 | 1104 | **1055** (raw DMA writer, verified; DLDI 890) | interrupt-driven DSpico DMA SD writer (`dl SDraw`), ARM7 safety poll removed |
 | 0.25 | – | – | raw sequential writes 3079 (CPU) / 2976 (DMA) KB/s, verified; Wi-Fi died during the downloads (ARM7 4 ms poll) |
 | 0.24 | 966 | 918 (961 ARM7 prio) | raw DSpico writes verified (CPU and DMA) but 150 KB/s single-sector; one Wi-Fi connect hang |
@@ -117,6 +118,19 @@ complete; an interrupted transfer resumes with HTTP Range requests (up to 5
 attempts). On a DSpico the file is written with interrupt-driven DMA
 (`sdraw=1` in `config.ini`, the default); otherwise through the DLDI driver.
 B cancels. Y in the ROM menu runs the speed test.
+
+## Library index
+
+Opening a platform updates a local index on the SD card
+(`romm/index/<platform id>.tsv`, metadata in `romm/meta/<rom id>.txt`). The
+first sync downloads the platform's ROM list without provider metadata
+(~5 KB per ROM instead of ~100 KB); later syncs only ask for ROMs updated
+since the last one and drop ROMs that were removed from RomM. Lists and the
+detail view then come from the SD card. X in a ROM list rebuilds the index.
+
+`*` marks ROMs that are already in `roms/<folder>/`. In the platform list,
+Y shows all platforms and SELECT hides or shows the selected one
+(`romm/hidden_platforms.txt`).
 
 ## Building
 
