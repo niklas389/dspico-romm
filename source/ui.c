@@ -91,9 +91,20 @@ int ui_letter_of(const char *name)
 
 static void hint_line(uint16_t *fb, const char *hint)
 {
-    if (hint)
-        gfx_text(fb, &font_small, GFX_W / 2, GFX_H - 14, UI_MUTED, hint, GFX_CENTER,
-                 GFX_W - 8);
+    if (!hint)
+        return;
+    // Too wide: single spaces between the button groups, then truncation
+    char tmp[160];
+    if (gfx_text_width(&font_small, hint) > GFX_W - 8)
+    {
+        int n = 0;
+        for (const char *p = hint; *p && n < (int)sizeof(tmp) - 1; p++)
+            if (!(p[0] == ' ' && p[1] == ' '))
+                tmp[n++] = *p;
+        tmp[n] = 0;
+        hint = tmp;
+    }
+    gfx_text(fb, &font_small, GFX_W / 2, GFX_H - 14, UI_MUTED, hint, GFX_CENTER, GFX_W - 8);
 }
 
 static void background(uint16_t *fb)
@@ -162,11 +173,12 @@ static void battery_icon(uint16_t *fb, int x, int y, int v)
     int level = v & 0xF;
     bool charging = v & 0x80;
     gfx_color_t frame_c = UI_WHITE;
-    gfx_fill(fb, x, y, 18, 1, frame_c);
-    gfx_fill(fb, x, y + 9, 18, 1, frame_c);
+    // Frame x..x+18, segments x+2..x+16: one pixel of space on both sides
+    gfx_fill(fb, x, y, 19, 1, frame_c);
+    gfx_fill(fb, x, y + 9, 19, 1, frame_c);
     gfx_fill(fb, x, y, 1, 10, frame_c);
-    gfx_fill(fb, x + 17, y, 1, 10, frame_c);
-    gfx_fill(fb, x + 18, y + 3, 2, 4, frame_c);
+    gfx_fill(fb, x + 18, y, 1, 10, frame_c);
+    gfx_fill(fb, x + 19, y + 3, 2, 4, frame_c);
     gfx_color_t c = charging ? GFX_RGB(120, 230, 120) : level <= 1 ? UI_RED : UI_WHITE;
     int segs = level >= 15 ? 4 : level >= 11 ? 3 : level >= 7 ? 2 : level >= 3 ? 1 : 0;
     if (segs == 0 && !charging)
@@ -200,8 +212,8 @@ void ui_top_header(uint16_t *fb, const char *left, const char *right)
         x -= gfx_text(fb, &font_bold, x, 1, UI_WHITE, right, GFX_RIGHT, 90) + 6;
     if (ui_battery >= 0)
     {
-        battery_icon(fb, x - 20, 3, ui_battery);
-        x -= 27;
+        battery_icon(fb, x - 21, 3, ui_battery);
+        x -= 28;
     }
     if (ui_wifi_level > -2)
         wifi_icon(fb, x - 11, 2, ui_wifi_level);

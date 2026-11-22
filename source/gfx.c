@@ -45,8 +45,9 @@ void gfx_init(void)
     vramSetBankA(VRAM_A_MAIN_BG);
     bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
     gfx_init_bottom();
-    gfx_clear(gfx_top, GFX_RGB(236, 238, 241));
-    gfx_clear(gfx_bot, GFX_RGB(236, 238, 241));
+    // Black until the theme is known (no white flash in dark mode)
+    gfx_clear(gfx_top, GFX_RGB(0, 0, 0));
+    gfx_clear(gfx_bot, GFX_RGB(0, 0, 0));
     dirty_top = dirty_bot = true;
 }
 

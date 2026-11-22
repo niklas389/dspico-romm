@@ -74,6 +74,7 @@ static void rotate_logs(const char *path)
 
 static bool g_quit;          // START: leave the app
 static bool g_console;       // Bottom screen shows the text console
+static bool g_theme_ready;   // ui.txt read: the step list may be drawn
 
 static bool g_wifi_up;
 static bool g_top_header;    // Top screen has the status bar (clock, Wi-Fi)
@@ -223,6 +224,7 @@ static void splash_top(const char *line)
 
 static void fatal(const char *msg)
 {
+    g_theme_ready = true;
     log_printf("\nFATAL: %s\n", msg);
     log_close();
     if (g_console)
@@ -278,7 +280,7 @@ static void step_mark(int i, int state, const char *detail)
         snprintf(g_step_detail[i], sizeof(g_step_detail[i]), "%s", detail);
         g_steps[i].detail = g_step_detail[i];
     }
-    if (!g_console)
+    if (!g_console && g_theme_ready)
     {
         ui_draw_steps(gfx_bot, "Starting", g_steps, ST_COUNT, NULL);
         frame();
@@ -2527,7 +2529,7 @@ static void step_platforms(void)
         ui_strip_t s = { edit ? "Show / hide platforms" : "Platforms", sub, tiles, n, sel, pos,
                          p ? cap : NULL, NULL, 0,
                          edit ? "A: hide / show  Y: done"
-                              : "A open  X sync all saves  Y show/hide  SELECT tools" };
+                              : "A open  X sync saves  Y show/hide  SELECT tools" };
         ui_draw_strip(gfx_bot, &s);
         frame();
         strip_animate(&pos, sel);
@@ -2683,6 +2685,8 @@ int main(int argc, char **argv)
     log_printf("Save slot: %s\n", g_cfg.save_slot);
     cover_tile_box2d = g_cfg.art_box2d;
     ui_settings_load();
+    g_theme_ready = true;
+    step_mark(ST_SD, 1, NULL);
     log_printf("Artwork in the strip: %s\n", g_cfg.art_box2d ? "box2d" : "cover");
     log_file_only("URL: %s insecure=%d verbose=%d\n", g_cfg.url, g_cfg.insecure,
                   g_cfg.verbose);

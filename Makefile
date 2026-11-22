@@ -19,6 +19,7 @@ NAME		?= romm-poc
 GAME_TITLE	:= RomM PoC
 GAME_SUBTITLE	:= DSPico RomM client
 GAME_AUTHOR	:= dspico-romm
+GAME_ICON	:= icon.bmp
 
 # Alternative DSWiFi build (see tools/build_dswifi.sh). Defaults to the SDK's.
 DSWIFI_DIR	?= $(BLOCKSDS)/libs/dswifi
@@ -43,7 +44,7 @@ LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.58.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+DEFINES		:= -DPOC_VERSION=\"0.59.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
 		   -DTCP_WND_BYTES=$(WND_BYTES) $(EXTRA_DEFINES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile
