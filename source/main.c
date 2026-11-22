@@ -76,6 +76,10 @@ static void frame(void)
     scanKeys();
 }
 
+#ifdef DSPICO_DSWIFI
+static void wifi_fw_log(void);
+#endif
+
 static u16 wait_key(void)
 {
     while (1)
@@ -239,8 +243,38 @@ static void step_wifi(void)
     extern bool dswifi_rx_zero_copy;
     dswifi_rx_zero_copy = g_cfg.zerocopy;
     log_printf("Zero-copy RX: %s\n", g_cfg.zerocopy ? "on" : "off");
+
+    // ARM7 receive options (patches/dswifi-arm7-rx-dma.patch), applied by
+    // the ARM7 only while connected.
+    extern void Wifi_A7SetOpts(u32 opts);
+    Wifi_A7SetOpts((g_cfg.a7cmd53 ? 1u : 0u) | (g_cfg.a7dma ? 2u : 0u));
+    log_printf("ARM7 RX: cmd53 %s, DMA to ring %s\n", g_cfg.a7cmd53 ? "on" : "off",
+               g_cfg.a7dma ? "on" : "off");
+    wifi_fw_log();
 #endif
 }
+
+#ifdef DSPICO_DSWIFI
+// Wi-Fi firmware facts the patched ARM7 core records (DSPICO_A7I_* in
+// DSWiFi's wifi_shared.h): BMI target, HTC ready (credits, endpoints, HTC
+// version and bundle size from HTC 2.1 on), WMI ready, SDIO settings.
+static void wifi_fw_log(void)
+{
+    extern void Wifi_A7Info(u32 out[16]);
+    u32 a[16];
+    Wifi_A7Info(a);
+    const u8 *h = (const u8 *)&a[2];
+    log_printf("Wi-Fi FW: BMI target 0x%08lX, SDIO clk %lu bus %lu-bit blk %lu\n",
+               (unsigned long)a[0], (unsigned long)(a[9] & 0xFF),
+               (unsigned long)((a[9] >> 8) & 0xFF), (unsigned long)(a[9] >> 16));
+    log_printf("  HTC ready %lu B: credits %u x %u B, max ep %u, ver %u, bundle %u\n",
+               (unsigned long)a[1], h[0] | h[1] << 8, h[2] | h[3] << 8, h[4],
+               a[1] >= 8 ? h[6] : 0, a[1] >= 8 ? h[7] : 0);
+    log_printf("  WMI ready %lu B: %08lX %08lX %08lX %08lX\n", (unsigned long)a[4],
+               (unsigned long)a[5], (unsigned long)a[6], (unsigned long)a[7],
+               (unsigned long)a[8]);
+}
+#endif
 
 static const char *json_str(const cJSON *obj, const char *key)
 {
@@ -573,6 +607,11 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
     {
         dl_ui_t ui = { 0 };
         download_result_t r;
+#ifdef DSPICO_DSWIFI
+        extern void Wifi_A7Info(u32 out[16]);
+        u32 a7i0[16], a7i1[16];
+        Wifi_A7Info(a7i0);
+#endif
         bool ok = download_rom(&g_cfg, rom_id, fs_name, size, folder, download_progress,
                                &ui, &r);
 
@@ -584,6 +623,12 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
                    (unsigned long long)r.bytes, (unsigned long)r.ms, (unsigned long)kbps,
                    r.raw ? "DSpico DMA" : "DLDI", r.attempts);
         log_io(&r.io);
+#ifdef DSPICO_DSWIFI
+        Wifi_A7Info(a7i1);
+        log_printf("  ARM7 RX: %lu CMD53 reg reads, %lu pkts DMA to ring, ring full %lu\n",
+                   (unsigned long)(a7i1[10] - a7i0[10]), (unsigned long)(a7i1[11] - a7i0[11]),
+                   (unsigned long)(a7i1[14] - a7i0[14]));
+#endif
         if (!ok && !r.cancelled)
             log_printf("  %s\n", r.error);
         if (!ok)

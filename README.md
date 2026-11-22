@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.34 | – | – | ARM7 RX: status + lookahead in one CMD53 (`a7cmd53`), SDIO DMA straight into the RX ring (`a7dma`), Wi-Fi firmware info in the log; speed test rows `dl nodec` (TLS records counted, not decrypted) and ChaCha20 alignment |
 | 0.28 | – | – | local ROM index, detail view, hideable platforms |
 | 0.27 | – | 951 (110 MB ROM, 1 request) | ROM downloads into `/roms/<platform>/` (download.c) |
 | 0.26 | 1104 | **1055** (raw DMA writer, verified; DLDI 890) | interrupt-driven DSpico DMA SD writer (`dl SDraw`), ARM7 safety poll removed |

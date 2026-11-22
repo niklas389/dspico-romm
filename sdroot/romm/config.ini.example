@@ -17,6 +17,14 @@ sdraw=1
 ; (no copy). Set to 0 if downloads stall or fail.
 zerocopy=1
 
+; ARM7 Wi-Fi receive path, only while connected (patched build only):
+; a7cmd53=1 reads the interrupt status and the next packet's length in one
+; SDIO command instead of up to 9; a7dma=1 lets the SDIO DMA write packets
+; straight into the ring the ARM9 reads (no copy on the ARM7).
+; Set to 0 if Wi-Fi stalls or disconnects during downloads.
+a7cmd53=1
+a7dma=1
+
 ; 1 = skip certificate verification. Diagnostics only.
 insecure=0
 

@@ -57,6 +57,7 @@ git -C "$SRC" apply "$ROOT/patches/dswifi-zero-copy-rx.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-load.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-recv-zc.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-fast-rx.patch"
+git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-rx-dma.patch"
 sed -i "s/#define DSPICO_TCP_WND_MSS 32/#define DSPICO_TCP_WND_MSS $WND_MSS/" \
     "$SRC/source/arm9/lwip/include/lwipopts.h"
 sed -i "s/#define DSPICO_RXBUF_KB 12/#define DSPICO_RXBUF_KB $RXBUF_KB/" \

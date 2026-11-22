@@ -454,6 +454,77 @@ static uint64_t be64(const unsigned char *b)
     return v;
 }
 
+// Speed test: count the TLS records of the body without decrypting them
+// (network + ARM7 throughput without the ARM9's crypto). The connection is
+// unusable afterwards (record counter), so it is closed.
+bool dl_skip_decrypt = false;
+
+typedef struct
+{
+    uint8_t hdr[5];
+    int hdr_have;
+    uint32_t rec_left;    // Ciphertext bytes left in the current record
+    uint64_t plain;       // Sum of (record length - 17): content + type + tag
+} skip_t;
+
+static size_t skip_feed(void *ctx, const void *data, size_t len)
+{
+    skip_t *k = ctx;
+    const uint8_t *p = data;
+    size_t left = len;
+    while (left)
+    {
+        if (k->rec_left)
+        {
+            size_t n = left < k->rec_left ? left : k->rec_left;
+            k->rec_left -= n;
+            p += n;
+            left -= n;
+            continue;
+        }
+        k->hdr[k->hdr_have++] = *p++;
+        left--;
+        if (k->hdr_have == 5)
+        {
+            k->hdr_have = 0;
+            k->rec_left = (uint32_t)k->hdr[3] << 8 | k->hdr[4];
+            if (k->hdr[0] == 23 && k->rec_left > 17)
+                k->plain += k->rec_left - 17;
+        }
+    }
+    return len;
+}
+
+static bool skip_body(uint64_t *got, uint64_t body_len, progress_t *p,
+                      net_result_t *res)
+{
+    skip_t k = { 0 };
+    uint64_t start = *got;
+    while (start + k.plain < body_len || k.rec_left || k.hdr_have)
+    {
+        ssize_t n = lwip_recv_zc(g_dl.fd, SIZE_MAX, skip_feed, &k);
+        if (n < 0)
+        {
+            if (errno == EWOULDBLOCK || errno == EAGAIN)
+            {
+                if (!wait_fd(MBEDTLS_ERR_SSL_WANT_READ, p, res))
+                    return false;
+                continue;
+            }
+            snprintf(res->error, sizeof(res->error), "recv failed (%d)", errno);
+            return false;
+        }
+        if (n > 0)
+        {
+            p->last_data = net_now_ms();
+            *got = start + k.plain < body_len ? start + k.plain : body_len;
+            p->done = *got;
+        }
+    }
+    *got = body_len;
+    return true;
+}
+
 // Receives body bytes [*got, body_len) with tlsrx. Afterwards Mbed TLS's
 // record counter is updated, so the connection can be reused.
 static bool zc_body(sdwriter_t *sdw, unsigned char *bounce, uint64_t *got,
@@ -708,6 +779,17 @@ static bool request_once(const char *path, uint64_t first, uint64_t last,
         if (body_len != UINT64_MAX && zc_possible())
         {
             res->zero_copy_tls = true;
+            if (dl_skip_decrypt && !sdw)
+            {
+                bool sk = skip_body(&got, body_len, p, res);
+                dl_close(); // Record counter no longer matches
+                if (!sk)
+                    return false;
+                res->body_bytes = res->wire_bytes = got;
+                if (!ok_status)
+                    snprintf(res->error, sizeof(res->error), "HTTP %d", status);
+                return ok_status;
+            }
             if (!zc_body(sdw, discard, &got, body_len, p, res))
             {
                 dl_close();

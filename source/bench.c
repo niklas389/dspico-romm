@@ -157,8 +157,24 @@ static void bench_crypto(uint32_t *chacha_kbps, uint32_t *gcm_kbps)
         mbedtls_chachapoly_encrypt_and_tag(&cp, CRYPTO_BYTES, nonce, NULL, 0, in,
                                            out, tag);
     uint32_t dt = net_now_ms() - t0;
-    mbedtls_chachapoly_free(&cp);
     *chacha_kbps = kbps((uint64_t)CRYPTO_BYTES * CRYPTO_ROUNDS, dt);
+
+    // Alignment: TLS record bodies sit at arbitrary offsets in the TCP
+    // payload, so input/output are rarely both word aligned (the asm then
+    // takes its byte path). in+o_in -> out+o_out:
+    static const struct { int i, o; } al[] = { { 1, 0 }, { 2, 2 }, { 1, 3 } };
+    for (size_t a = 0; a < sizeof(al) / sizeof(al[0]); a++)
+    {
+        size_t n = CRYPTO_BYTES - 4;
+        t0 = net_now_ms();
+        for (int i = 0; i < CRYPTO_ROUNDS; i++)
+            mbedtls_chachapoly_encrypt_and_tag(&cp, n, nonce, NULL, 0, in + al[a].i,
+                                               out + al[a].o, tag);
+        dt = net_now_ms() - t0;
+        log_printf("CPU ChaCha20-Poly1305 in+%d out+%d: %lu KB/s\n", al[a].i, al[a].o,
+                   (unsigned long)kbps((uint64_t)n * CRYPTO_ROUNDS, dt));
+    }
+    mbedtls_chachapoly_free(&cp);
 
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
@@ -473,15 +489,20 @@ static u32 g_a7p0[8];
 
 #ifdef DSPICO_DSWIFI
 extern void Wifi_Arm7Prof(u32 out[8]);
+extern void Wifi_A7Info(u32 out[16]);
 #else
 static void Wifi_Arm7Prof(u32 out[8]) { memset(out, 0, 8 * sizeof(u32)); }
+static void Wifi_A7Info(u32 out[16]) { memset(out, 0, 16 * sizeof(u32)); }
 #endif
+
+static u32 g_a7i0[16];
 
 static void a7_start(void)
 {
     g_a7_lines0 = Wifi_Arm7BusyLines();
     g_a7_t0 = net_now_ms();
     Wifi_Arm7Prof(g_a7p0);
+    Wifi_A7Info(g_a7i0);
 }
 
 // ARM7 breakdown since a7_start(): microseconds from scanline sums.
@@ -509,6 +530,15 @@ static void a7_log(void)
                       (unsigned long)(US(p[1]) / pkts), (unsigned long)(US(p[3]) / pkts),
                       (unsigned long)(US(p[4]) / pkts),
                       (unsigned long)(irqs ? pkts / irqs : 0));
+    // Receive path counters (patches/dswifi-arm7-rx-dma.patch)
+    u32 in[16];
+    Wifi_A7Info(in);
+    for (int i = 10; i < 16; i++)
+        in[i] -= g_a7i0[i];
+    log_file_only("  ARM7 RX: %lu CMD53 reg reads, %lu pkts DMA to ring, lookahead %lu trailer / "
+                  "%lu regs, ring full %lu, EAPOL %lu\n",
+                  (unsigned long)in[10], (unsigned long)in[11], (unsigned long)in[12],
+                  (unsigned long)in[13], (unsigned long)in[14], (unsigned long)in[15]);
 #undef US
 }
 
@@ -851,7 +881,7 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     bench_sdraw(cfg);
 
     g_bench_cfg = cfg;
-    net_row_t rows[9];
+    net_row_t rows[10];
     int nrows = 0;
     // libcurl (v0.13 path) vs the curl-free client (dl.c), both with
     // zero-copy RX (zerocopy= in config.ini).
@@ -860,6 +890,14 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     go = run_net_sd_async(cfg, path, len, "curl SD", false, false, &rows[nrows++]);
     if (go)
         go = run_dl_net("dl net", path, len, true, &rows[nrows++]);
+    // Same transfer, TLS records counted but not decrypted: network + ARM7
+    // without the ARM9's crypto
+    if (go)
+    {
+        dl_skip_decrypt = true;
+        go = run_dl_net("dl nodec", path, len, false, &rows[nrows++]);
+        dl_skip_decrypt = false;
+    }
     if (go)
         go = run_net_sd_async(cfg, path, len, "dl SD", true, true, &rows[nrows++]);
     // SD writes with interrupt-driven DSpico DMA instead of the DLDI driver

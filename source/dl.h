@@ -29,6 +29,10 @@ extern bool dl_yield_per_record;
 // Decrypt TLS records directly from the network buffers (default true).
 extern bool dl_zero_copy_tls;
 
+// Speed test: discard the body's TLS records without decrypting them (no
+// SD writer only; closes the connection afterwards).
+extern bool dl_skip_decrypt;
+
 // Closes the keep-alive connection (the next call reconnects).
 void dl_close(void);
 

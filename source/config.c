@@ -75,6 +75,8 @@ bool config_load(config_t *cfg)
     snprintf(cfg->save_slot, sizeof(cfg->save_slot), "autosave");
     cfg->mtu = 1500;
     cfg->zerocopy = true;
+    cfg->a7cmd53 = true;
+    cfg->a7dma = true;
     cfg->sdraw = true;
 
     if (!find_base_dir(cfg))
@@ -130,6 +132,14 @@ bool config_load(config_t *cfg)
         else if (strcasecmp(key, "zerocopy") == 0)
         {
             cfg->zerocopy = parse_bool(val);
+        }
+        else if (strcasecmp(key, "a7cmd53") == 0)
+        {
+            cfg->a7cmd53 = parse_bool(val);
+        }
+        else if (strcasecmp(key, "a7dma") == 0)
+        {
+            cfg->a7dma = parse_bool(val);
         }
         else if (strcasecmp(key, "mtu") == 0)
         {
