@@ -155,6 +155,35 @@ static bool message(int kind, const char *title, const char *body, const char *h
     }
 }
 
+// <base>/ui.txt: interface settings changed in the app (dark=0/1)
+static void ui_settings_load(void)
+{
+    char p[CFG_PATH_MAX + 16];
+    config_path(&g_cfg, "ui.txt", p, sizeof(p));
+    FILE *f = fopen(p, "rb");
+    if (!f)
+        return;
+    char line[64];
+    while (fgets(line, sizeof(line), f))
+        if (!strncmp(line, "dark=", 5))
+        {
+            ui_set_dark(line[5] == '1');
+            cover_set_bg(ui_dark);
+        }
+    fclose(f);
+}
+
+static void ui_settings_save(void)
+{
+    char p[CFG_PATH_MAX + 16];
+    config_path(&g_cfg, "ui.txt", p, sizeof(p));
+    FILE *f = fopen(p, "wb");
+    if (!f)
+        return;
+    fprintf(f, "dark=%d\n", ui_dark ? 1 : 0);
+    fclose(f);
+}
+
 // START: asks before leaving the app (errors exit without asking)
 static bool confirm_quit(void)
 {
@@ -1142,6 +1171,9 @@ static bool conflict_has(int rom_id)
 }
 
 // At start: sync every ROM on the SD card whose save changed on one side only.
+static bool g_startup = true;
+static int g_ss_up, g_ss_down, g_ss_conflicts, g_ss_errors, g_ss_checked;
+
 static void savesync_auto(const int *ids, const char **folders, int n)
 {
     if (!g_cfg.token[0] || !ss_init(&g_cfg))
@@ -1212,10 +1244,18 @@ static void savesync_auto(const int *ids, const char **folders, int n)
                  "Saves at start: %d uploaded, %d downloaded%s%.0d%s%s%.0d%s", up, down,
                  conflicts ? ", " : "", conflicts, conflicts ? " conflict(s)" : "",
                  errors ? ", " : "", errors, errors ? " error(s)" : "");
-    char d[40];
-    snprintf(d, sizeof(d), "%d up, %d down%s", up, down,
-             conflicts ? ", conflicts" : errors ? ", errors" : "");
-    step_mark(ST_SAVES, errors ? 3 : 2, d);
+    g_ss_up = up;
+    g_ss_down = down;
+    g_ss_conflicts = conflicts;
+    g_ss_errors = errors;
+    g_ss_checked = checked;
+    if (g_startup)
+    {
+        char d[40];
+        snprintf(d, sizeof(d), "%d up, %d down%s", up, down,
+                 conflicts ? ", conflicts" : errors ? ", errors" : "");
+        step_mark(ST_SAVES, errors ? 3 : 2, d);
+    }
 }
 
 static void format_time(time_t t, char *out, int len)
@@ -1380,13 +1420,16 @@ static void show_log_tail(void)
 // Returns 1 if "Download all artwork" was chosen (handled by the game screen)
 static int tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
 {
-    const char *items[5];
-    int act[5], n = 0, sel = 0;
+    const char *items[6];
+    int act[6], n = 0, sel = 0;
     if (e)
     {
         items[n] = "Download all artwork (this platform)";
         act[n++] = 4;
     }
+    int dark_item = n;
+    items[n] = ui_dark ? "Dark mode: on" : "Dark mode: off";
+    act[n++] = 5;
     items[n] = "Show log";
     act[n++] = 0;
     if (e)
@@ -1437,6 +1480,14 @@ static int tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
             }
             else if (act[sel] == 4)
                 return 1;
+            else if (act[sel] == 5)
+            {
+                ui_set_dark(!ui_dark);
+                cover_set_bg(ui_dark);
+                ui_settings_save();
+                items[dark_item] = ui_dark ? "Dark mode: on" : "Dark mode: off";
+                return 2; // Caller redraws the top screen
+            }
             else
                 return 0;
         }
@@ -2283,6 +2334,7 @@ static void browse_platform(int platform_id, const char *platform_name,
             {
                 if (tools_menu(e, folder, g.on_sd[sel]) == 1)
                     art_bulk(&g);
+                cover_for = -1;
                 shown = -1;
             }
             else if (k & KEY_Y)
@@ -2428,6 +2480,7 @@ static void step_platforms(void)
         }
         step_mark(ST_SAVES, 1, NULL);
         savesync_auto(ids, folders, n_ids);
+        g_startup = false; // From here on no start-up step screen
     }
 
     ui_tile_t *tiles = calloc(count, sizeof(ui_tile_t));
@@ -2474,7 +2527,7 @@ static void step_platforms(void)
         ui_strip_t s = { edit ? "Show / hide platforms" : "Platforms", sub, tiles, n, sel, pos,
                          p ? cap : NULL, NULL, 0,
                          edit ? "A: hide / show  Y: done"
-                              : "A open  Y show/hide  SELECT tools  START quit" };
+                              : "A open  X sync all saves  Y show/hide  SELECT tools" };
         ui_draw_strip(gfx_bot, &s);
         frame();
         strip_animate(&pos, sel);
@@ -2520,6 +2573,42 @@ static void step_platforms(void)
         else if (k & KEY_SELECT)
         {
             (void)tools_menu(NULL, NULL, false);
+            shown = -1;
+        }
+        else if ((k & KEY_X) && !edit)
+        {
+            // All saves of the visible platforms: safe directions sync,
+            // conflicts stay for the game screen (Y)
+            int ids[64], n_ids = 0;
+            const char *folders[64];
+            for (int i = 0; i < count && n_ids < 64; i++)
+            {
+                bool hid = false;
+                for (int j = 0; j < n_hidden; j++)
+                    hid |= hidden[j] == pl[i].id;
+                if (!hid)
+                {
+                    ids[n_ids] = pl[i].id;
+                    folders[n_ids++] = pl[i].folder;
+                }
+            }
+            ui_progress_t pr = { "Syncing saves", "Checking all platforms...", -1, NULL, NULL,
+                                 { NULL }, 0, NULL, UI_INFO };
+            ui_draw_progress(gfx_bot, &pr);
+            frame();
+            savesync_auto(ids, folders, n_ids);
+            char body[240];
+            int n = snprintf(body, sizeof(body), "%d uploaded, %d downloaded.", g_ss_up,
+                             g_ss_down);
+            if (g_ss_conflicts && n < (int)sizeof(body))
+                n += snprintf(body + n, sizeof(body) - n,
+                              "\n\n%d conflict(s): these games show an orange \"!\". "
+                              "Open one and press Y to choose a version.", g_ss_conflicts);
+            if (g_ss_errors && n < (int)sizeof(body))
+                snprintf(body + n, sizeof(body) - n, "\n\n%d error(s), see the log.",
+                         g_ss_errors);
+            message(g_ss_errors ? UI_ERROR : g_ss_conflicts ? UI_WARN : UI_OK,
+                    g_ss_up + g_ss_down ? "Saves synced" : "All saves up to date", body, NULL);
             shown = -1;
         }
         else if ((k & KEY_A) && p && edit)
@@ -2593,6 +2682,7 @@ int main(int argc, char **argv)
     log_printf("Config: %sconfig.ini\n", g_cfg.base_dir);
     log_printf("Save slot: %s\n", g_cfg.save_slot);
     cover_tile_box2d = g_cfg.art_box2d;
+    ui_settings_load();
     log_printf("Artwork in the strip: %s\n", g_cfg.art_box2d ? "box2d" : "cover");
     log_file_only("URL: %s insecure=%d verbose=%d\n", g_cfg.url, g_cfg.insecure,
                   g_cfg.verbose);

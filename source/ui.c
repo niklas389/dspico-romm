@@ -4,6 +4,35 @@
 #include <stdio.h>
 #include <string.h>
 
+// --- Theme -----------------------------------------------------------------------
+
+static const ui_theme_t theme_light = {
+    GFX_RGB(236, 238, 241), GFX_RGB(222, 226, 232), GFX_RGB(255, 255, 255),
+    GFX_RGB(200, 204, 212), GFX_RGB(32, 34, 42),    GFX_RGB(104, 108, 120),
+    GFX_RGB(170, 174, 184), GFX_RGB(52, 122, 204),  GFX_RGB(96, 160, 232),
+    GFX_RGB(52, 150, 78),   GFX_RGB(222, 244, 226), GFX_RGB(214, 130, 36),
+    GFX_RGB(255, 240, 220), GFX_RGB(204, 60, 56),   GFX_RGB(252, 228, 226),
+    GFX_RGB(226, 238, 252),
+};
+
+static const ui_theme_t theme_dark = {
+    GFX_RGB(26, 28, 33),    GFX_RGB(52, 56, 64),    GFX_RGB(40, 43, 50),
+    GFX_RGB(66, 70, 80),    GFX_RGB(232, 234, 238), GFX_RGB(160, 165, 176),
+    GFX_RGB(96, 100, 110),  GFX_RGB(60, 132, 216),  GFX_RGB(96, 160, 232),
+    GFX_RGB(88, 196, 116),  GFX_RGB(30, 62, 40),    GFX_RGB(236, 156, 64),
+    GFX_RGB(72, 52, 26),    GFX_RGB(236, 96, 88),   GFX_RGB(78, 34, 32),
+    GFX_RGB(30, 48, 74),
+};
+
+ui_theme_t ui_theme = theme_light;
+bool ui_dark;
+
+void ui_set_dark(bool dark)
+{
+    ui_dark = dark;
+    ui_theme = dark ? theme_dark : theme_light;
+}
+
 // --- Helpers --------------------------------------------------------------------
 
 gfx_color_t ui_name_color(const char *name)
@@ -81,7 +110,7 @@ static gfx_color_t kind_color(int kind)
 static gfx_color_t kind_bg(int kind)
 {
     return kind == UI_OK ? UI_GREEN_BG : kind == UI_WARN ? UI_ORANGE_BG
-         : kind == UI_ERROR ? UI_RED_BG : GFX_RGB(226, 238, 252);
+         : kind == UI_ERROR ? UI_RED_BG : UI_INFO_BG;
 }
 
 // Placeholder or image tile
@@ -596,7 +625,7 @@ void ui_draw_pairing(uint16_t *fb, const char *url, const char *code, int secs_l
                   "Scan the QR code on the top screen and approve the device, or open "
                   "this address and enter the code:");
     gfx_text(fb, &font_bold, 20, 80, UI_ACCENT, url, GFX_LEFT, GFX_W - 40);
-    gfx_rrect(fb, 48, 100, GFX_W - 96, 30, 9, GFX_RGB(226, 238, 252), UI_ACCENT, 1);
+    gfx_rrect(fb, 48, 100, GFX_W - 96, 30, 9, UI_INFO_BG, UI_ACCENT, 1);
     gfx_text(fb, &font_title, GFX_W / 2, 108, UI_TEXT, code, GFX_CENTER, GFX_W - 100);
     char t[40];
     snprintf(t, sizeof(t), "Code valid for %d:%02d", secs_left / 60, secs_left % 60);

@@ -12,22 +12,33 @@
 
 #include "gfx.h"
 
-// Theme (fixed blue)
-#define UI_BG        GFX_RGB(236, 238, 241)
-#define UI_BG2       GFX_RGB(222, 226, 232)
-#define UI_PANEL     GFX_RGB(255, 255, 255)
-#define UI_LINE      GFX_RGB(200, 204, 212)
-#define UI_TEXT      GFX_RGB(32, 34, 42)
-#define UI_MUTED     GFX_RGB(104, 108, 120)
-#define UI_FAINT     GFX_RGB(170, 174, 184)
-#define UI_ACCENT    GFX_RGB(52, 122, 204)
-#define UI_ACCENT_HI GFX_RGB(96, 160, 232)
-#define UI_GREEN     GFX_RGB(52, 150, 78)
-#define UI_GREEN_BG  GFX_RGB(222, 244, 226)
-#define UI_ORANGE    GFX_RGB(214, 130, 36)
-#define UI_ORANGE_BG GFX_RGB(255, 240, 220)
-#define UI_RED       GFX_RGB(204, 60, 56)
-#define UI_RED_BG    GFX_RGB(252, 228, 226)
+// Theme: light or dark (ui_set_dark), fixed blue accent
+typedef struct
+{
+    gfx_color_t bg, bg2, panel, line, text, muted, faint, accent, accent_hi, green, green_bg,
+        orange, orange_bg, red, red_bg, info_bg;
+} ui_theme_t;
+
+extern ui_theme_t ui_theme;
+void ui_set_dark(bool dark);
+extern bool ui_dark;
+
+#define UI_BG        (ui_theme.bg)
+#define UI_BG2       (ui_theme.bg2)
+#define UI_PANEL     (ui_theme.panel)
+#define UI_LINE      (ui_theme.line)
+#define UI_TEXT      (ui_theme.text)
+#define UI_MUTED     (ui_theme.muted)
+#define UI_FAINT     (ui_theme.faint)
+#define UI_ACCENT    (ui_theme.accent)
+#define UI_ACCENT_HI (ui_theme.accent_hi)
+#define UI_GREEN     (ui_theme.green)
+#define UI_GREEN_BG  (ui_theme.green_bg)
+#define UI_ORANGE    (ui_theme.orange)
+#define UI_ORANGE_BG (ui_theme.orange_bg)
+#define UI_RED       (ui_theme.red)
+#define UI_RED_BG    (ui_theme.red_bg)
+#define UI_INFO_BG   (ui_theme.info_bg)
 #define UI_WHITE     GFX_RGB(255, 255, 255)
 
 enum { UI_INFO, UI_OK, UI_WARN, UI_ERROR }; // Kinds (colours) of messages

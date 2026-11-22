@@ -93,6 +93,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.54 | – | – | Strip: 2D box art; top screen: cover (as in 0.51). Cover cache per platform, read with one folder scan (no per-game file lookups); images load only when the strip stands still; downloads only after 0.5 s of rest |
 | 0.55 | – | – | Artwork speed: streaming PNG decoder (zlib, row-wise scaling, yields every ~4 ms), TJpgDec for JPEG at 1/2..1/8 scale, stb_image only as fallback; per-image fetch/decode timing in the log; art=box2d/cover setting; "Download all artwork" in the tools menu |
 | 0.56 | – | – | Measured (0.55, DSi): box2d 705x700 PNG 2.7 s decode + 0.8 s fetch, small cover 162x216 0.19 s + 0.1 s. Decoding now converts/scales only sampled rows and columns (max 3x3 per output pixel), zlib state in ITCM, log splits inflate/rows time; START asks before quitting; Wi-Fi bar thresholds from RSSI 202 at -54 dBm |
+| 0.57 | – | – | Dark mode (tools menu, saved in romm/ui.txt); X on the platform screen syncs all saves of the visible platforms (safe directions only, summary with conflicts) |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -125,13 +126,14 @@ shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
 ## Controls
 
 ![Screens](docs/ui-screens.png)
+![Dark mode](docs/ui-screens-dark.png)
 
 | Screen | Buttons |
 | --- | --- |
-| Platforms | ◀ ▶ select, L/R jump 4, A open, Y show/hide platforms, SELECT tools, START quit |
+| Platforms | ◀ ▶ select, L/R jump 4, A open, X sync all saves (visible platforms; conflicts stay for the game screen), Y show/hide platforms, SELECT tools, START quit (asks first) |
 | Games | ◀ ▶ select (hold to scroll), L/R previous/next letter, A details (download there), Y save sync, X re-scan the platform, B back, SELECT tools, START quit |
 | Save sync | L keep the DSi save (upload), R keep the RomM save (download), B back |
-| Tools (SELECT) | Show log, speed test, unzip CPU test (text console) |
+| Tools (SELECT) | Download all artwork, dark mode on/off (saved in `romm/ui.txt`), show log, speed test, unzip CPU test (text console) |
 
 Artwork comes from RomM (PNG or JPEG). The strip shows the 2D box art
 (ScreenScraper `box2d`, which RomM stores next to the cover when `box2d` is in

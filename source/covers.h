@@ -41,6 +41,9 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
 bool cover_load(const config_t *cfg, int platform_id, int rom_id, int kind, uint16_t *out,
                 int *w, int *h);
 
+// Background colour for transparent artwork (light/dark theme)
+void cover_set_bg(bool dark);
+
 // Streaming box-filter scaler: source rows in, RGB15 out (covers_img.c)
 typedef struct
 {

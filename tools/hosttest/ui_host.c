@@ -50,6 +50,8 @@ int main(int argc, char **argv)
     if (argc > 1)
         outdir = argv[1];
     gfx_alloc();
+    if (argc > 2)
+        ui_set_dark(true); // ui_host outdir dark
 
     // Game screen
     int n = sizeof(names) / sizeof(names[0]);

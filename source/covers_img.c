@@ -5,10 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Background for transparent pixels (UI_BG)
-#define BG_R 236
-#define BG_G 238
-#define BG_B 241
+// Background for transparent pixels (the theme's UI_BG)
+static uint32_t BG_R = 236, BG_G = 238, BG_B = 241;
+
+void cover_set_bg(bool dark)
+{
+    BG_R = dark ? 26 : 236;
+    BG_G = dark ? 28 : 238;
+    BG_B = dark ? 33 : 241;
+}
 
 void rs_geometry(int w, int h, bool fill, int maxw, int maxh, int *cx, int *cy, int *cw,
                  int *ch, int *dw, int *dh)
