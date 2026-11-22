@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
 | 0.37 | – | – | speed test: DSi AES engine feasibility (register conventions found against Mbed TLS, 256 KB AES-CTR through the ARM7 by CPU and NDMA, verified) and GHASH with an 8-bit table on the ARM9 |
 | 0.36 | – | – | decryption through a 1 KiB aligned DTCM buffer when TLS data is misaligned (v0.35 profile: ~60 % of ChaCha20 time in the byte path); v0.35: dl net **1259** KB/s, ARM7 ~475 us per packet |
@@ -154,9 +155,11 @@ slot set by `save_slot` in `config.ini` (default `autosave`):
 
 - at start, for every ROM on the SD card whose save changed on one side only
   (games with a conflict are listed and left alone);
-- in the ROM detail view: the status line shows `Save: in sync / DSi newer /
-  RomM newer / CONFLICT`, SELECT syncs that game; on a conflict (or to force
-  a direction) L uploads the DSi save, R downloads the RomM save.
+- in the ROM detail view, whenever it is shown (also right after a ROM
+  download): a save that changed on one side only is synced automatically
+  (`Save: uploaded / downloaded`); otherwise the line shows `Save: in sync /
+  CONFLICT`. SELECT opens the save screen; on a conflict (or to force a
+  direction) L uploads the DSi save, R downloads the RomM save.
 
 Per ROM the app compares the local save's MD5, the newest server save of the
 slot (its `content_hash` and whether RomM marks it current for this device),

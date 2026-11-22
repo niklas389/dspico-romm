@@ -100,6 +100,8 @@ static void press_any_key(void)
     wait_key();
 }
 
+static void wifi_shutdown(void);
+
 static void fatal(const char *msg)
 {
     log_printf("\nFATAL: %s\n", msg);
@@ -109,7 +111,10 @@ static void fatal(const char *msg)
     {
         frame();
         if (keysDown() & KEY_START)
+        {
+            wifi_shutdown();
             exit(1);
+        }
     }
 }
 
@@ -212,14 +217,87 @@ static void step_system_info(void)
     log_printf("(wrong clock breaks cert check)\n");
 }
 
+static bool g_wifi_up;
+
+// Shuts the Wi-Fi hardware and library down (also before exiting, so the
+// next start finds the module idle).
+static void wifi_shutdown(void)
+{
+    if (!g_wifi_up)
+        return;
+    Wifi_DisconnectAP();
+    Wifi_DisableWifi();
+    for (int i = 0; i < 6; i++)
+        swiWaitForVBlank();
+    Wifi_Deinit();
+    g_wifi_up = false;
+}
+
+// One connection attempt with our own timeout (Wifi_InitDefault with
+// WFC_CONNECT blocks). Logs each association state change.
+static bool wifi_try_connect(int attempt)
+{
+    if (!Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
+    {
+        log_printf("Wi-Fi: init failed (attempt %d)\n", attempt);
+        return false;
+    }
+    g_wifi_up = true;
+    Wifi_AutoConnect();
+
+    int last = -1;
+    for (int frames = 0; frames < 20 * 60; frames++) // ~20 s
+    {
+        int st = Wifi_AssocStatus();
+        if (st != last)
+        {
+            log_printf("  %4d ms: %s\n", frames * 1000 / 60,
+                       (st >= 0 && st <= ASSOCSTATUS_CANNOTCONNECT) ? ASSOCSTATUS_STRINGS[st]
+                                                                    : "?");
+            last = st;
+        }
+        if (st == ASSOCSTATUS_ASSOCIATED)
+            return true;
+        if (st == ASSOCSTATUS_CANNOTCONNECT)
+            break;
+        swiWaitForVBlank();
+    }
+#ifdef DSPICO_DSWIFI
+    extern void Wifi_A7Info(u32 out[16]);
+    u32 a7[16];
+    Wifi_A7Info(a7);
+    log_printf("Wi-Fi: attempt %d failed, BMI target 0x%08lX%s\n", attempt,
+               (unsigned long)a7[0], a7[0] == 0xFFFFFFFF ? " (module not answering)" : "");
+#else
+    log_printf("Wi-Fi: attempt %d failed\n", attempt);
+#endif
+    return false;
+}
+
 static void step_wifi(void)
 {
-    log_printf("Wi-Fi: connecting (WFC)...\n");
+    log_printf("Wi-Fi: connecting...\n");
 
-    if (!Wifi_InitDefault(WFC_CONNECT | WIFI_ATTEMPT_DSI_MODE))
+    // The module sometimes does not come up when the app is started again
+    // without a power cycle: shut everything down and try again.
+    bool ok = false;
+    for (int attempt = 1; attempt <= 3 && !ok; attempt++)
+    {
+        if (attempt > 1)
+        {
+            printf("Wi-Fi: retry %d of 3...\n", attempt);
+            wifi_shutdown();
+            for (int i = 0; i < 60; i++)
+                swiWaitForVBlank();
+        }
+        ok = wifi_try_connect(attempt);
+    }
+    if (!ok)
         fatal("Wi-Fi connect failed.\n"
               "Set up the AP in DSi System\n"
-              "Settings (slot 4-6 for WPA2).");
+              "Settings (slot 4-6 for WPA2).\n"
+              "If it worked before: switch\n"
+              "the DSi off and on.");
 
     // Wifi_InitDefault() can return before DHCP has finished: wait for the
     // address (the ARM7 receive options below are only enabled afterwards).
@@ -1062,6 +1140,23 @@ static void rom_save_sync(const rom_entry_t *e, const char *folder, bool run)
     ss_list_free(&srv);
     if (!run)
     {
+        // Safe cases (one side changed) are synced right away
+        if (st.action == SS_UPLOAD || st.action == SS_DOWNLOAD ||
+            (st.action == SS_IN_SYNC && !st.base_local[0]))
+        {
+            char err[128];
+            log_printf("\n[Save sync] %s: %s (auto)\n", e->name, ss_action_name(st.action));
+            if (ss_apply(&g_cfg, &st, st.action, err, sizeof(err)))
+                printf("Save: %s\n", st.action == SS_UPLOAD ? "uploaded"
+                                      : st.action == SS_DOWNLOAD ? "downloaded"
+                                                                 : "in sync");
+            else
+            {
+                printf("Save: sync failed\n");
+                log_printf("  failed: %s\n", err);
+            }
+            return;
+        }
         printf("Save: %s\n", ss_action_name(st.action));
         return;
     }
@@ -1319,8 +1414,7 @@ int main(int argc, char **argv)
 
     log_printf("\nDone. Log: %s" LOG_NAME "\n", g_cfg.base_dir);
     net_cleanup();
-    Wifi_DisconnectAP();
-    Wifi_DisableWifi();
+    wifi_shutdown();
     log_close();
 
     printf("Press START to exit\n");
