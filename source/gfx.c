@@ -402,30 +402,44 @@ int gfx_text(uint16_t *fb, const font_t *f, int x, int y, gfx_color_t c, const c
     return w;
 }
 
+// One wrapped line starting at s: *end = end of the text to draw, returns the
+// start of the next line
+static const char *wrap_line(const font_t *f, const char *s, int w, const char **end)
+{
+    const char *p = s, *brk = NULL;
+    int acc = 0;
+    while (*p && *p != '\n')
+    {
+        const char *q = p;
+        int a = glyph(f, utf8_next(&q))->adv;
+        if (acc + a > w)
+            break;
+        acc += a;
+        p = q;
+        if (*p == ' ' || *p == '\n' || !*p)
+            brk = p;
+    }
+    if (*p && *p != '\n' && brk)
+        p = brk; // Break at the last space
+    if (p == s && *p && *p != '\n')
+        utf8_next(&p); // At least one character per line
+    *end = p;
+    while (*p == ' ')
+        p++;
+    if (*p == '\n')
+        p++;
+    return p;
+}
+
 int gfx_text_wrap(uint16_t *fb, const font_t *f, int x, int y, int w, int max_lines,
                   gfx_color_t c, const char *s)
 {
     int lines = 0;
     while (*s && lines < max_lines)
     {
-        // Longest prefix up to a space/newline that fits
-        const char *p = s, *brk = NULL;
-        int acc = 0;
-        while (*p && *p != '\n')
-        {
-            const char *q = p;
-            int a = glyph(f, utf8_next(&q))->adv;
-            if (acc + a > w)
-                break;
-            acc += a;
-            p = q;
-            if (*p == ' ' || *p == '\n' || !*p)
-                brk = p;
-        }
-        if (*p && *p != '\n' && brk)
-            p = brk; // Break at the last space
-        bool last = lines == max_lines - 1;
-        if (last && *p && *p != '\n')
+        const char *end;
+        const char *next = wrap_line(f, s, w, &end);
+        if (lines == max_lines - 1 && *next)
         {
             // Last line: the rest, truncated
             char tmp[256];
@@ -439,15 +453,28 @@ int gfx_text_wrap(uint16_t *fb, const font_t *f, int x, int y, int w, int max_li
         else
         {
             gfx_dirty(fb);
-            draw_run(fb, f, x, y, c, s, p);
+            draw_run(fb, f, x, y, c, s, end);
         }
         lines++;
         y += f->height;
-        s = p;
-        while (*s == ' ')
-            s++;
-        if (*s == '\n')
-            s++;
+        s = next;
+    }
+    return lines;
+}
+
+int gfx_text_wrap_scroll(uint16_t *fb, const font_t *f, int x, int y, int w, int skip,
+                         int max_lines, gfx_color_t c, const char *s)
+{
+    int lines = 0;
+    gfx_dirty(fb);
+    while (*s)
+    {
+        const char *end;
+        const char *next = wrap_line(f, s, w, &end);
+        if (lines >= skip && lines < skip + max_lines)
+            draw_run(fb, f, x, y + (lines - skip) * f->height, c, s, end);
+        lines++;
+        s = next;
     }
     return lines;
 }

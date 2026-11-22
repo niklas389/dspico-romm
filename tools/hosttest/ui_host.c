@@ -151,6 +151,19 @@ int main(int argc, char **argv)
     ui_draw_list(gfx_bot, "Tools", items, 4, 1, "A select  B back");
     save("menu");
 
+    // Details page, scrolled
+    int scroll = 3;
+    ui_draw_page(gfx_bot, "Mario Party DS", "Mario Party DS (Europe).nds  \xC2\xB7  64.0 MB",
+                 "Bowser shrinks Mario and friends with a magic machine. Play 70+ mini-games "
+                 "using the stylus, microphone and buttons. Story mode takes the party across "
+                 "five boards, each with its own boss mini-game. Up to four players can join "
+                 "with one cartridge (DS Download Play). The game was developed by Hudson "
+                 "Soft and published by Nintendo in 2007. It sold over 9 million copies "
+                 "worldwide, making it one of the best-selling games on the system. Extra "
+                 "text so that the page needs scrolling to read everything that RomM has.",
+                 "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download again  Y: save  B: back", &scroll);
+    save("page");
+
     // Pairing
     ui_draw_pairing(gfx_bot, "https://romm.example.org/pair/device", "ABCD-1234", 587);
     save("pairing");

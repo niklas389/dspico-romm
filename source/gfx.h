@@ -58,6 +58,11 @@ int gfx_text_width(const font_t *f, const char *s);
 int gfx_text_wrap(uint16_t *fb, const font_t *f, int x, int y, int w, int max_lines,
                   gfx_color_t c, const char *s);
 
+// Word-wrapped text from line `skip` on, at most max_lines lines. Returns the
+// total number of lines of the text (for scrolling).
+int gfx_text_wrap_scroll(uint16_t *fb, const font_t *f, int x, int y, int w, int skip,
+                         int max_lines, gfx_color_t c, const char *s);
+
 // Blend helper: a over b, alpha 0..256
 gfx_color_t gfx_mix(gfx_color_t a, gfx_color_t b, int alpha);
 

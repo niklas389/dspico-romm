@@ -311,16 +311,17 @@ void ui_draw_strip(uint16_t *fb, const ui_strip_t *s)
         // Letter bar
         int ly = 146;
         int step_q8 = (GFX_W - 16) * 256 / 27;
+        if (s->letter >= 0 && s->letter < 27)
+        {
+            int x = 8 + (s->letter * step_q8 + step_q8 / 2) / 256;
+            gfx_rrect(fb, x - 5, ly - 1, 11, 15, 4, UI_ACCENT, 0, 0);
+        }
+        // Letters after the highlight, the neighbours' letters stay readable
         for (int i = 0; i < 27; i++)
         {
             char ch[2] = { i == 0 ? '#' : (char)('A' + i - 1), 0 };
             int x = 8 + (i * step_q8 + step_q8 / 2) / 256;
-            gfx_color_t c = s->letters[i] ? UI_TEXT : UI_FAINT;
-            if (i == s->letter)
-            {
-                gfx_rrect(fb, x - 6, ly - 1, 13, 15, 4, UI_ACCENT, 0, 0);
-                c = UI_WHITE;
-            }
+            gfx_color_t c = i == s->letter ? UI_WHITE : s->letters[i] ? UI_TEXT : UI_FAINT;
             gfx_text(fb, &font_small, x, ly, c, ch, GFX_CENTER, 0);
         }
     }
@@ -452,7 +453,7 @@ void ui_draw_savesync(uint16_t *fb, const ui_savesync_t *s)
 }
 
 void ui_draw_page(uint16_t *fb, const char *title, const char *sub, const char *body,
-                  const char *hint)
+                  const char *hint, int *scroll)
 {
     background(fb);
     panel(fb, 8, 8, GFX_W - 16, GFX_H - 34);
@@ -464,9 +465,30 @@ void ui_draw_page(uint16_t *fb, const char *title, const char *sub, const char *
         gfx_text(fb, &font_small, 20, y + 1, UI_MUTED, sub, GFX_LEFT, GFX_W - 40);
         y += font_small.height + 2;
     }
-    if (body)
-        gfx_text_wrap(fb, &font_small, 20, y + 5, GFX_W - 40, (GFX_H - 34 - y) / 13, UI_TEXT,
-                      body);
+    if (!body)
+    {
+        hint_line(fb, hint);
+        return;
+    }
+    y += 5;
+    int rows = (GFX_H - 30 - y) / font_small.height;
+    int total = gfx_text_wrap_scroll(NULL, &font_small, 0, 0, GFX_W - 46, 0, 0, 0, body);
+    int max = total > rows ? total - rows : 0;
+    if (*scroll > max)
+        *scroll = max;
+    if (*scroll < 0)
+        *scroll = 0;
+    gfx_text_wrap_scroll(fb, &font_small, 20, y, GFX_W - 46, *scroll, rows, UI_TEXT, body);
+    if (max > 0)
+    {
+        // Scroll bar
+        int th = rows * font_small.height, bx = GFX_W - 20;
+        gfx_rrect(fb, bx, y, 4, th, 2, UI_BG2, 0, 0);
+        int kh = th * rows / total;
+        if (kh < 8)
+            kh = 8;
+        gfx_rrect(fb, bx, y + (th - kh) * *scroll / max, 4, kh, 2, UI_ACCENT_HI, 0, 0);
+    }
     hint_line(fb, hint);
 }
 

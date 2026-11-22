@@ -157,9 +157,10 @@ typedef struct
 
 void ui_draw_savesync(uint16_t *fb, const ui_savesync_t *s);
 
-// Text page (game details): title, body text, hint
+// Text page (game details): title, body text, hint. *scroll: first body line
+// (clamped here).
 void ui_draw_page(uint16_t *fb, const char *title, const char *sub, const char *body,
-                  const char *hint);
+                  const char *hint, int *scroll);
 
 // Vertical list (hidden menu, settings)
 void ui_draw_list(uint16_t *fb, const char *title, const char *const *items, int n, int sel,

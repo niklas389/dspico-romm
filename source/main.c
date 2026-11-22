@@ -1525,21 +1525,31 @@ static void game_page(games_t *g, int sel)
     format_size(e->size, sz, sizeof(sz));
     snprintf(sub, sizeof(sub), "%s  \xC2\xB7  %s%s%s", e->fs_name, sz,
              publisher[0] ? "  \xC2\xB7  " : "", publisher);
+    int scroll = 0;
     while (1)
     {
         ui_draw_page(gfx_bot, e->name, sub, summary[0] ? summary : "No description in RomM.",
-                     "A: download again  Y: save sync  B: back");
-        u16 k = wait_key();
-        if (k & KEY_B)
+                     "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download again  Y: save  B: back",
+                     &scroll);
+        u16 k = wait_key(), rep = keysDownRepeat();
+        if (rep & KEY_DOWN)
+            scroll++;
+        else if (rep & KEY_UP)
+            scroll--;
+        else if (k & KEY_R)
+            scroll += 8;
+        else if (k & KEY_L)
+            scroll -= 8;
+        else if (k & KEY_B)
             return;
-        if (k & KEY_A)
+        else if (k & KEY_A)
         {
             download_to_library(e->id, e->fs_name, e->size, g->folder, false);
             g->on_sd[sel] = download_local(&g_cfg, g->folder, e->fs_name, NULL, 0, NULL);
             games_tiles(g, sel);
             return;
         }
-        if (k & KEY_Y)
+        else if (k & KEY_Y)
         {
             save_sync_screen(e, g->folder);
             g->save[sel] = -1;
@@ -1551,17 +1561,76 @@ static void game_page(games_t *g, int sel)
 // Save status of one game from the platform's server list (no network)
 static void games_save_status(games_t *g, int sel)
 {
-    if (g->save[sel] >= 0 || !g->on_sd[sel] || !save_capable(g->folder))
+    if (g->save[sel] >= 0 || !g->on_sd[sel] || !save_capable(g->folder) || !g->have_srv)
         return;
-    if (!g->have_srv)
-    {
-        g->save[sel] = SS_ERROR;
-        return;
-    }
     ss_status_t st;
     ss_status(&g_cfg, &g->idx.e[sel], g->folder, &g->srv, &st);
     g->save[sel] = (signed char)st.action;
     games_tiles(g, sel);
+}
+
+// Background update of the game list and the platform's save list, so the
+// strip shows the index from the SD card right away. Network calls of the
+// main thread wait for it first (one curl handle).
+typedef struct
+{
+    int platform_id;
+    bool want_srv;
+    rom_index_t idx;
+    idx_sync_result_t r;
+    bool ok;
+    ss_list_t srv;
+    bool have_srv;
+    volatile bool done;
+} bgsync_t;
+
+static int bgsync_thread(void *arg)
+{
+    bgsync_t *b = arg;
+    b->ok = idx_sync(&g_cfg, &b->idx, NULL, &b->r);
+    if (b->want_srv)
+        b->have_srv = ss_fetch(&g_cfg, b->platform_id, 0, &b->srv);
+    b->done = true;
+    return 0;
+}
+
+static bool bgsync_start(bgsync_t *b, int platform_id, bool want_srv)
+{
+    memset(b, 0, sizeof(*b));
+    b->platform_id = platform_id;
+    b->want_srv = want_srv;
+    idx_init(&b->idx, platform_id);
+    idx_load(&g_cfg, &b->idx);
+    if (cothread_create(bgsync_thread, b, 32 * 1024, COTHREAD_DETACHED) < 0)
+    {
+        idx_free(&b->idx);
+        b->done = true;
+        return false;
+    }
+    return true;
+}
+
+// Waits until the background update has finished
+static void bgsync_wait(bgsync_t *b, bool *running)
+{
+    for (int f = 0; *running && !b->done; f++)
+    {
+        if (f == 20)
+        {
+            ui_progress_t p = { "Updating game list", NULL, -1, "One moment...", NULL,
+                                { NULL }, 0, NULL, UI_INFO };
+            ui_draw_progress(gfx_bot, &p);
+        }
+        frame();
+    }
+}
+
+static int find_rom(const rom_index_t *idx, int id)
+{
+    for (int i = 0; i < idx->count; i++)
+        if (idx->e[i].id == id)
+            return i;
+    return -1;
 }
 
 static void browse_platform(int platform_id, const char *platform_name,
@@ -1572,37 +1641,48 @@ static void browse_platform(int platform_id, const char *platform_name,
     g.platform_name = platform_name;
     g.folder = folder;
     idx_init(&g.idx, platform_id);
-    bool have = idx_load(&g_cfg, &g.idx);
+    bool have = idx_load(&g_cfg, &g.idx) && g.idx.count > 0;
+    bool want_srv = save_capable(folder) && g_cfg.token[0] && ss_init(&g_cfg);
 
     bool full = false;
     int sel = 0;
+    static bgsync_t bg;
+    bool bg_running = false;
     while (!g_quit)
     {
-        // Bring the index up to date (incremental unless it is new or X)
-        if (full)
+        if (full || !have)
         {
-            idx_free(&g.idx);
-            idx_init(&g.idx, platform_id);
-        }
-        g_sync_name = platform_name;
-        sync_progress(0, 0);
-        idx_sync_result_t r;
-        bool ok = idx_sync(&g_cfg, &g.idx, sync_progress, &r);
-        log_printf("\n[Index %s] %s: %d fetched, %d removed, %d ROMs, %d req, %lu ms\n",
-                   platform_name, ok ? (r.full ? "full" : "update") : "FAILED",
-                   r.fetched, r.removed, g.idx.count, r.requests, (unsigned long)r.ms);
-        if (!ok)
-        {
-            log_printf("  %s\n", r.error);
-            if (!have && g.idx.count == 0)
+            // In the foreground: first sync of the platform, or X (full)
+            if (full)
             {
-                message(UI_ERROR, "Game list not available", r.error, NULL);
-                break;
+                idx_free(&g.idx);
+                idx_init(&g.idx, platform_id);
             }
-            log_printf("  showing the saved index\n");
-            message(UI_WARN, "Game list not updated",
-                    "RomM could not be reached. Showing the list saved on the SD card.", NULL);
+            g_sync_name = platform_name;
+            sync_progress(0, 0);
+            idx_sync_result_t r;
+            bool ok = idx_sync(&g_cfg, &g.idx, sync_progress, &r);
+            log_printf("\n[Index %s] %s: %d fetched, %d removed, %d ROMs, %d req, %lu ms\n",
+                       platform_name, ok ? (r.full ? "full" : "update") : "FAILED",
+                       r.fetched, r.removed, g.idx.count, r.requests, (unsigned long)r.ms);
+            if (!ok)
+            {
+                log_printf("  %s\n", r.error);
+                if (g.idx.count == 0)
+                {
+                    message(UI_ERROR, "Game list not available", r.error, NULL);
+                    break;
+                }
+                message(UI_WARN, "Game list not updated",
+                        "RomM could not be reached. Showing the list saved on the SD card.",
+                        NULL);
+            }
+            if (want_srv)
+                g.have_srv = ss_fetch(&g_cfg, platform_id, 0, &g.srv);
+            have = true;
         }
+        else
+            bg_running = bgsync_start(&bg, platform_id, want_srv);
         full = false;
 
         if (g.idx.count == 0)
@@ -1611,22 +1691,56 @@ static void browse_platform(int platform_id, const char *platform_name,
             break;
         }
         if (!games_build(&g))
-        {
-            games_free(&g);
             break;
-        }
-        if (save_capable(folder) && g_cfg.token[0] && ss_init(&g_cfg))
-            g.have_srv = ss_fetch(&g_cfg, platform_id, 0, &g.srv);
 
         if (sel >= g.idx.count)
             sel = g.idx.count - 1;
         int pos = sel * 256, idle = 0, shown = -1;
-        bool leave = false;
+        bool leave = false, offline = false;
+        u16 pending = 0; // Key held back until the background update is taken
         static char summary[600];
-        char sub[24], cap[64];
-        snprintf(sub, sizeof(sub), "%d game%s", g.idx.count, g.idx.count == 1 ? "" : "s");
+        char sub[40];
         while (!leave && !g_quit)
         {
+            if (bg_running && bg.done)
+            {
+                // Background update finished: take the new list if it changed
+                bg_running = false;
+                log_printf("\n[Index %s] %s (background): %d fetched, %d removed, %d ROMs, "
+                           "%d req, %lu ms\n", platform_name,
+                           bg.ok ? (bg.r.full ? "full" : "update") : "FAILED", bg.r.fetched,
+                           bg.r.removed, bg.idx.count, bg.r.requests, (unsigned long)bg.r.ms);
+                offline = !bg.ok;
+                if (!bg.ok)
+                    log_printf("  %s\n", bg.r.error);
+                if (bg.ok && (bg.r.fetched || bg.r.removed) && bg.idx.count > 0)
+                {
+                    int id = g.idx.e[sel].id;
+                    games_free(&g);
+                    idx_free(&g.idx);
+                    g.idx = bg.idx;
+                    if (!games_build(&g))
+                    {
+                        leave = true;
+                        break;
+                    }
+                    int i = find_rom(&g.idx, id);
+                    sel = i >= 0 ? i : (sel < g.idx.count ? sel : g.idx.count - 1);
+                    pos = sel * 256;
+                }
+                else
+                    idx_free(&bg.idx);
+                if (bg.have_srv)
+                {
+                    if (g.have_srv)
+                        ss_list_free(&g.srv);
+                    g.srv = bg.srv;
+                    g.have_srv = true;
+                    memset(g.save, -1, g.idx.count);
+                }
+                shown = -1;
+            }
+
             const rom_entry_t *e = &g.idx.e[sel];
             // Details once the selection rests (SD reads, save hashing)
             if (shown != sel)
@@ -1642,12 +1756,17 @@ static void browse_platform(int platform_id, const char *platform_name,
                 games_save_status(&g, sel);
                 game_top(&g, sel, summary);
             }
+            else if (idle > 12 && g.save[sel] < 0 && g.have_srv && g.on_sd[sel] &&
+                     save_capable(folder))
+            {
+                // The save list arrived after the selection came to rest
+                games_save_status(&g, sel);
+                game_top(&g, sel, summary);
+            }
 
-            char sz[16];
-            format_size(e->size, sz, sizeof(sz));
-            snprintf(cap, sizeof(cap), "%s%s", sz,
-                     g.on_sd[sel] ? "  \xC2\xB7  on SD card" : "");
-            ui_strip_t s = { platform_name, sub, g.tiles, g.idx.count, sel, pos, cap, g.letters,
+            snprintf(sub, sizeof(sub), "%d game%s%s", g.idx.count, g.idx.count == 1 ? "" : "s",
+                     bg_running ? "  \xC2\xB7  updating" : offline ? "  \xC2\xB7  offline" : "");
+            ui_strip_t s = { platform_name, sub, g.tiles, g.idx.count, sel, pos, NULL, g.letters,
                              g.letter[sel],
                              g.on_sd[sel] ? "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A details  Y save  B back"
                                           : "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A download  Y save  B back" };
@@ -1656,6 +1775,12 @@ static void browse_platform(int platform_id, const char *platform_name,
             strip_animate(&pos, sel);
 
             u16 k = keysDown(), rep = keysDownRepeat();
+            if (pending)
+            {
+                k = pending;
+                rep = 0;
+                pending = 0;
+            }
             int nsel = strip_keys_move(rep, sel, g.idx.count);
             if (k & KEY_R)
                 nsel = letter_jump(&g, sel, 1);
@@ -1664,6 +1789,15 @@ static void browse_platform(int platform_id, const char *platform_name,
             if (nsel != sel)
             {
                 sel = nsel;
+                continue;
+            }
+            // Everything below may use the network: the update finishes first,
+            // is taken at the top of the loop, then the key is handled
+            const u16 net_keys = KEY_START | KEY_B | KEY_X | KEY_SELECT | KEY_Y | KEY_A;
+            if ((k & net_keys) && bg_running)
+            {
+                bgsync_wait(&bg, &bg_running);
+                pending = k & net_keys;
                 continue;
             }
             if (k & KEY_START)
@@ -1703,6 +1837,14 @@ static void browse_platform(int platform_id, const char *platform_name,
                 }
                 shown = -1;
             }
+        }
+        if (bg_running)
+        {
+            bgsync_wait(&bg, &bg_running);
+            bg_running = false;
+            idx_free(&bg.idx);
+            if (bg.have_srv)
+                ss_list_free(&bg.srv);
         }
         if (g.have_srv)
             ss_list_free(&g.srv);
