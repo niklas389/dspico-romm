@@ -1071,8 +1071,14 @@ static void rom_save_sync(const rom_entry_t *e, const char *folder, bool run)
     printf("Save sync\n%.31s\n\n", e->name);
     if (st.have_local)
     {
+        // Pico Launcher writes saves with a fixed file date (2018-01-01), so
+        // dates before 2020 carry no information
         char t[32];
-        format_time(st.local_mtime, t, sizeof(t));
+        struct tm *lt = localtime(&st.local_mtime);
+        if (lt && lt->tm_year + 1900 >= 2020)
+            format_time(st.local_mtime, t, sizeof(t));
+        else
+            snprintf(t, sizeof(t), "date unknown");
         printf("DSi:  %s\n      %lu B\n", t, (unsigned long)st.local_size);
     }
     else
