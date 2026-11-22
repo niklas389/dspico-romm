@@ -29,6 +29,7 @@
 #include "gfx.h"
 #include "cJSON.h"
 #include "config.h"
+#include "covers.h"
 #include "log.h"
 #include "net.h"
 #include "prof.h"
@@ -1474,7 +1475,11 @@ typedef struct
     bool letters[27];
     ss_list_t srv;
     bool have_srv;
+    uint8_t *cov;            // COV_* per game (covers.h), COV_UNKNOWN until checked
+    uint16_t **timg;         // Loaded tile images (TILE_S^2), NULL if not loaded
 } games_t;
+
+#define COV_FAILED 9         // Download failed this session (not retried)
 
 static void games_tiles(games_t *g, int i)
 {
@@ -1493,7 +1498,9 @@ static bool games_build(games_t *g)
     g->tiles = calloc(n, sizeof(ui_tile_t));
     g->labels = calloc(n, sizeof(*g->labels));
     g->letter = malloc(n);
-    if (!g->on_sd || !g->save || !g->tiles || !g->labels || !g->letter)
+    g->cov = calloc(n, 1);
+    g->timg = calloc(n, sizeof(uint16_t *));
+    if (!g->on_sd || !g->save || !g->tiles || !g->labels || !g->letter || !g->cov || !g->timg)
         return false;
     memset(g->save, -1, n);
     memset(g->letters, 0, sizeof(g->letters));
@@ -1591,6 +1598,13 @@ static bool games_build(games_t *g)
 
 static void games_free(games_t *g)
 {
+    if (g->timg)
+        for (int i = 0; i < g->idx.count; i++)
+            free(g->timg[i]);
+    free(g->timg);
+    free(g->cov);
+    g->timg = NULL;
+    g->cov = NULL;
     free(g->on_sd);
     free(g->save);
     free(g->tiles);
@@ -1632,12 +1646,12 @@ static int letter_jump(const games_t *g, int sel, int dir)
     return sel;
 }
 
-static void game_top(games_t *g, int sel, const char *summary)
+static void game_top(games_t *g, int sel, const char *summary, const uint16_t *cover)
 {
     const rom_entry_t *e = &g->idx.e[sel];
     ui_game_t t = { e->name, g->platform_name, e->regions, e->genres, e->players, summary,
                     e->year, e->size, g->on_sd[sel], download_is_archive(e->fs_name),
-                    NULL, UI_INFO, NULL, 0, 0, clock_str() };
+                    NULL, UI_INFO, cover, COVER_W, COVER_H, clock_str() };
     if (save_capable(g->folder) && g->on_sd[sel])
     {
         if (g->save[sel] >= 0)
@@ -1670,7 +1684,7 @@ static void game_summary(int rom_id, char *out, int len, char *publisher, int pl
         snprintf(out, len, "%s", summary + 2);
 }
 
-// A on a game that is on the SD card: details page
+// A: details page (description, download, save sync)
 static void game_page(games_t *g, int sel)
 {
     const rom_entry_t *e = &g->idx.e[sel];
@@ -1684,7 +1698,9 @@ static void game_page(games_t *g, int sel)
     while (1)
     {
         ui_draw_page(gfx_bot, e->name, sub, summary[0] ? summary : "No description in RomM.",
-                     "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download again  Y: save  B: back",
+                     g->on_sd[sel]
+                         ? "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download again  Y: save  B: back"
+                         : "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download  B: back",
                      &scroll);
         u16 k = wait_key(), rep = keysDownRepeat();
         if (rep & KEY_DOWN)
@@ -1704,7 +1720,7 @@ static void game_page(games_t *g, int sel)
             games_tiles(g, sel);
             return;
         }
-        else if (k & KEY_Y)
+        else if ((k & KEY_Y) && g->on_sd[sel])
         {
             save_sync_screen(e, g->folder);
             g->save[sel] = -1;
@@ -1788,6 +1804,139 @@ static int find_rom(const rom_index_t *idx, int id)
     return -1;
 }
 
+// --- Covers: background worker and image cache --------------------------------
+//
+// The worker checks the SD cache nearest-first around the selection and
+// downloads missing covers. Decoding blocks the CPU for ~0.1 s, so a download
+// only starts while the selection rests. Main-thread network calls pause the
+// worker first (one curl handle).
+
+typedef struct
+{
+    games_t *g;
+    volatile int focus;
+    volatile bool resting;
+    volatile bool pause, stop;
+    volatile bool busy, exited;
+    volatile int fetched;    // Covers added (main reloads images when it changes)
+} covw_t;
+
+static int covw_thread(void *arg)
+{
+    covw_t *w = arg;
+    while (!w->stop)
+    {
+        if (w->pause)
+        {
+            // Sleep, not spin: a paused worker must not take CPU from downloads
+            w->busy = false;
+            cothread_yield_irq(IRQ_VBLANK);
+            continue;
+        }
+        w->busy = true;
+        games_t *g = w->g;
+        int n = g->idx.count, f = w->focus, pick = -1;
+        // Nearest game whose cover state is unknown or missing
+        for (int d = 0; d < n && pick < 0; d++)
+            for (int side = -1; side <= 1 && pick < 0; side += 2)
+            {
+                int i = f + side * d;
+                if (i < 0 || i >= n || (d == 0 && side == 1))
+                    continue;
+                if (g->cov[i] == COV_UNKNOWN)
+                {
+                    g->cov[i] = (uint8_t)cover_state(&g_cfg, &g->idx.e[i]);
+                    if (g->cov[i] == COV_CACHED)
+                        w->fetched++;
+                    pick = -2; // One SD check per round, then yield
+                }
+                else if (g->cov[i] == COV_MISSING && w->resting)
+                    pick = i;
+            }
+        if (pick >= 0)
+        {
+            int r = cover_fetch(&g_cfg, &g->idx.e[pick]);
+            if (!w->pause && !w->stop && w->g == g && pick < g->idx.count)
+                g->cov[pick] = (uint8_t)(r == COV_MISSING ? COV_FAILED : r);
+            if (r == COV_CACHED)
+                w->fetched++;
+        }
+        w->busy = false;
+        if (pick == -1)
+        {
+            // Nothing to do near the focus: wait a moment
+            for (int i = 0; i < 10 && !w->stop && !w->pause; i++)
+                cothread_yield_irq(IRQ_VBLANK);
+        }
+        else
+            cothread_yield();
+    }
+    w->busy = false;
+    w->exited = true;
+    return 0;
+}
+
+static bool covw_start(covw_t *w, games_t *g)
+{
+    memset((void *)w, 0, sizeof(*w));
+    w->g = g;
+    if (cothread_create(covw_thread, (void *)w, 32 * 1024, COTHREAD_DETACHED) < 0)
+    {
+        w->exited = true;
+        return false;
+    }
+    return true;
+}
+
+// Waits until the worker is between jobs and keeps it there
+static void covw_pause(covw_t *w)
+{
+    w->pause = true;
+    while (w->busy && !w->exited)
+        frame();
+}
+
+static void covw_stop(covw_t *w)
+{
+    w->stop = true;
+    while (!w->exited)
+        frame();
+}
+
+// Loads cached tiles near the selection (one SD read per frame) and frees far ones
+static void games_load_tiles(games_t *g, int sel)
+{
+    int n = g->idx.count;
+    for (int i = 0; i < n; i++)
+        if (g->timg[i] && (i < sel - 12 || i > sel + 12))
+        {
+            free(g->timg[i]);
+            g->timg[i] = NULL;
+            g->tiles[i].img = NULL;
+        }
+    for (int d = 0; d <= 4; d++)
+        for (int side = -1; side <= 1; side += 2)
+        {
+            int i = sel + side * d;
+            if (i < 0 || i >= n || g->cov[i] != COV_CACHED || g->timg[i])
+                continue;
+            uint16_t *img = malloc(TILE_S * TILE_S * 2);
+            if (img && cover_load_tile(&g_cfg, g->idx.e[i].id, img))
+            {
+                g->timg[i] = img;
+                g->tiles[i].img = img;
+                g->tiles[i].img_w = TILE_S;
+                g->tiles[i].img_h = TILE_S;
+            }
+            else
+            {
+                free(img);
+                g->cov[i] = COV_NONE;
+            }
+            return;
+        }
+}
+
 static void browse_platform(int platform_id, const char *platform_name,
                             const char *folder)
 {
@@ -1803,6 +1952,9 @@ static void browse_platform(int platform_id, const char *platform_name,
     int sel = 0;
     static bgsync_t bg;
     bool bg_running = false;
+    static covw_t cw;
+    bool cw_running = false;
+    static uint16_t top_cover[COVER_W * COVER_H];
     while (!g_quit)
     {
         if (full || !have)
@@ -1850,7 +2002,7 @@ static void browse_platform(int platform_id, const char *platform_name,
 
         if (sel >= g.idx.count)
             sel = g.idx.count - 1;
-        int pos = sel * 256, idle = 0, shown = -1;
+        int pos = sel * 256, idle = 0, shown = -1, cover_for = -1, seen_fetched = 0;
         bool leave = false, offline = false;
         u16 pending = 0; // Key held back until the background update is taken
         static char summary[600];
@@ -1871,6 +2023,8 @@ static void browse_platform(int platform_id, const char *platform_name,
                 if (bg.ok && (bg.r.fetched || bg.r.removed) && bg.idx.count > 0)
                 {
                     int id = g.idx.e[sel].id;
+                    if (cw_running)
+                        covw_pause(&cw);
                     games_free(&g);
                     idx_free(&g.idx);
                     g.idx = bg.idx;
@@ -1882,6 +2036,8 @@ static void browse_platform(int platform_id, const char *platform_name,
                     int i = find_rom(&g.idx, id);
                     sel = i >= 0 ? i : (sel < g.idx.count ? sel : g.idx.count - 1);
                     pos = sel * 256;
+                    cover_for = -1;
+                    cw.pause = false;
                 }
                 else
                     idx_free(&bg.idx);
@@ -1895,13 +2051,17 @@ static void browse_platform(int platform_id, const char *platform_name,
                 }
                 shown = -1;
             }
+            // Covers start once the list is final (the network is free then)
+            if (!bg_running && !cw_running && g_cfg.token[0])
+                cw_running = covw_start(&cw, &g);
 
             const rom_entry_t *e = &g.idx.e[sel];
+            const uint16_t *cov_img = cover_for == sel ? top_cover : NULL;
             // Details once the selection rests (SD reads, save hashing)
             if (shown != sel)
             {
                 summary[0] = 0;
-                game_top(&g, sel, NULL);
+                game_top(&g, sel, NULL, cov_img);
                 shown = sel;
                 idle = 0;
             }
@@ -1909,21 +2069,39 @@ static void browse_platform(int platform_id, const char *platform_name,
             {
                 game_summary(e->id, summary, sizeof(summary), NULL, 0);
                 games_save_status(&g, sel);
-                game_top(&g, sel, summary);
+                if (g.cov[sel] == COV_CACHED && cover_load_top(&g_cfg, e->id, top_cover))
+                    cover_for = sel;
+                game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
             }
             else if (idle > 12 && g.save[sel] < 0 && g.have_srv && g.on_sd[sel] &&
                      save_capable(folder))
             {
                 // The save list arrived after the selection came to rest
                 games_save_status(&g, sel);
-                game_top(&g, sel, summary);
+                game_top(&g, sel, summary, cov_img);
+            }
+            else if (idle > 12 && cover_for != sel && g.cov[sel] == COV_CACHED)
+            {
+                // The cover arrived while the selection rests
+                if (cover_load_top(&g_cfg, e->id, top_cover))
+                    cover_for = sel;
+                game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
+            }
+            if (cw_running)
+            {
+                cw.focus = sel;
+                cw.resting = idle > 20;
+                if (cw.fetched != seen_fetched || idle < 2)
+                {
+                    seen_fetched = cw.fetched;
+                    games_load_tiles(&g, sel);
+                }
             }
 
             snprintf(sub, sizeof(sub), "%d game%s", g.idx.count, g.idx.count == 1 ? "" : "s");
             ui_strip_t s = { platform_name, sub, g.tiles, g.idx.count, sel, pos, NULL, g.letters,
                              g.letter[sel],
-                             g.on_sd[sel] ? "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A details  Y save  B back"
-                                          : "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A download  Y save  B back" };
+                             "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A details  Y save  B back" };
             s.status = bg_running ? 1 : offline ? 2 : 0;
             s.anim = (int)g_frames;
             ui_draw_strip(gfx_bot, &s);
@@ -1956,6 +2134,8 @@ static void browse_platform(int platform_id, const char *platform_name,
                 pending = k & net_keys;
                 continue;
             }
+            if ((k & net_keys) && cw_running)
+                covw_pause(&cw);
             if (k & KEY_START)
                 g_quit = true;
             else if (k & KEY_B)
@@ -1982,17 +2162,17 @@ static void browse_platform(int platform_id, const char *platform_name,
             }
             else if (k & KEY_A)
             {
-                if (g.on_sd[sel])
-                    game_page(&g, sel);
-                else
-                {
-                    download_to_library(e->id, e->fs_name, e->size, folder, true);
-                    g.on_sd[sel] = download_local(&g_cfg, folder, e->fs_name, NULL, 0, NULL);
-                    g.save[sel] = -1;
-                    games_tiles(&g, sel);
-                }
+                game_page(&g, sel);
+                g.save[sel] = -1;
                 shown = -1;
             }
+            if (cw_running && !leave && !g_quit)
+                cw.pause = false;
+        }
+        if (cw_running)
+        {
+            covw_stop(&cw);
+            cw_running = false;
         }
         if (bg_running)
         {

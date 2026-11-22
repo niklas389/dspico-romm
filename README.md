@@ -87,6 +87,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.48 | – | – | UI fixes: scrollable game details (▲▼, L/R page), letter bar highlight behind the letters, game list and save list updated in a background thread (strip shows the SD index at once; "updating"/"offline" in the title), size shown once |
 | 0.49 | – | – | Status bar: Wi-Fi icon (RSSI value logged for calibration) and clock refreshed every second; update/offline shown as an icon; downloads recorded in romm/library.txt and file names compared case-insensitively (unpacked games recognized) |
 | 0.50 | – | – | On-SD detection: fallback match ignoring punctuation, case and accents; log lists ROM files in the folder without an exact RomM match |
+| 0.51 | – | – | Cover art: background download nearest the selection (only while it rests, paused for other network use), PNG/JPEG decode (stb_image), SD cache in display format; A opens the details page for every game |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -123,11 +124,16 @@ shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
 | Screen | Buttons |
 | --- | --- |
 | Platforms | ◀ ▶ select, L/R jump 4, A open, Y show/hide platforms, SELECT tools, START quit |
-| Games | ◀ ▶ select (hold to scroll), L/R previous/next letter, A download (or details if on the SD card), Y save sync, X re-scan the platform, B back, SELECT tools, START quit |
+| Games | ◀ ▶ select (hold to scroll), L/R previous/next letter, A details (download there), Y save sync, X re-scan the platform, B back, SELECT tools, START quit |
 | Save sync | L keep the DSi save (upload), R keep the RomM save (download), B back |
 | Tools (SELECT) | Show log, speed test, unzip CPU test (text console) |
 
-Covers are placeholders (initials on a colour) until cover art is added.
+Covers come from RomM (`path_cover_small`, PNG or JPEG). While the selection
+rests in a platform, a background thread downloads the missing ones nearest
+the selected game first, decodes them (stb_image) and stores them in display
+format in `romm/covers/<rom id>.cov` (90x120 for the top screen, 64x64 for the
+strip). `<rom id>.none` marks games without a usable cover. Games without a
+cover keep the placeholder (initials on a colour).
 
 ## Downloading ROMs
 
