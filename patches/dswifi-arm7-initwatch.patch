@@ -1,0 +1,168 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 3e9a4a6..167e1e1 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -1252,6 +1252,28 @@ static void wifi_card_process_pkts_upstream(void)
+     while (wifi_card_mbox0_readpkt());
+ }
+ 
++// dspico-romm: while waiting for the firmware's first messages (HTC ready,
++// WMI ready), check for pending card interrupts from the update tick too. On
++// some starts the first card IRQ never reached the ARM7, so the handshake
++// never ran and the module stayed silent ("Searching" until timeout).
++void dspico_card_poll(void)
++{
++    if (!wifi_card_bInitted)
++        return;
++    u32 int_sts = wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
++    if (!int_sts)
++        return;
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_POLL_HITS]++;
++    wifi_card_write_func1_u32(F1_HOST_INT_STATUS, int_sts);
++    while (wifi_card_mbox0_readpkt());
++}
++
++bool dspico_card_started(void)
++{
++    return wifi_card_bInitted;
++}
++
+ static void wifi_card_process_pkts(void)
+ {
+     if (!wifi_card_fast_path())
+@@ -1691,11 +1713,21 @@ static int wifi_card_wlan_init_bmifinish(void)
+     WLOG_FLUSH();
+     wifi_card_bmi_start_firmware();
+ 
+-    while (1)
++    // dspico-romm: bounded wait (upstream waits forever; the init watchdog
++    // in update.twl.c then initializes the card again)
++    for (int tries = 0;; tries++)
+     {
+         u32 is_ready = wifi_card_read_intern_word(device_host_interest_addr + 0x58);
+         if (is_ready == 1)
+             break;
++        if (tries >= 4000)
++        {
++            if (WifiData)
++                WifiData->a7_diag[DSPICO_A7D_FW_TIMEOUT]++;
++            WLOG_PUTS("T: FW ready timeout\n");
++            WLOG_FLUSH();
++            return -1;
++        }
+ 
+         ioDelay(0x1000);
+     }
+diff --git a/source/arm7/twl/update.twl.c b/source/arm7/twl/update.twl.c
+index 828f174..9b77e8b 100644
+--- a/source/arm7/twl/update.twl.c
++++ b/source/arm7/twl/update.twl.c
+@@ -20,6 +20,15 @@
+ 
+ static void Wifi_TWL_Update_(void);
+ 
++// dspico-romm: init watchdog (see dspico_card_poll in card.twl.c)
++void dspico_card_poll(void);
++bool dspico_card_started(void);
++static u32 init_ticks;    // Update ticks (1 ms) in WIFIMODE_INITIALIZING
++static u32 init_restarts; // Re-inits for the current enable request
++#define INIT_POLL_TICKS    100  // Poll for card interrupts after 100 ms
++#define INIT_RESTART_TICKS 3000 // Initialize the card again after 3 s
++#define INIT_MAX_RESTARTS  3
++
+ // dspico-romm: measures the ARM7 time spent here (see arm7_busy_lines).
+ void Wifi_TWL_Update(void)
+ {
+@@ -45,6 +54,8 @@ static void Wifi_TWL_Update_(void)
+             // If any other mode has been requested we need to initialize WiFi
+             if (WifiData->reqMode != WIFIMODE_DISABLED)
+             {
++                init_ticks = 0;
++                init_restarts = 0;
+                 Wifi_TWL_Start();
+                 WifiData->curMode = WIFIMODE_INITIALIZING;
+             }
+@@ -52,12 +63,37 @@ static void Wifi_TWL_Update_(void)
+         }
+         case WIFIMODE_INITIALIZING:
+         {
++            // dspico-romm: a disable request during init was ignored
++            // upstream, so the app's "switch off and on again" retry never
++            // reached the card
++            if (WifiData->reqMode == WIFIMODE_DISABLED)
++            {
++                Wifi_TWL_Stop();
++                WifiData->curMode = WIFIMODE_DISABLED;
++                break;
++            }
++
+             // Wait until the card is fully initialized to enter normal mode
+             if (wifi_card_initted())
+             {
++                WifiData->a7_diag[DSPICO_A7D_INIT_MS] = init_ticks;
+                 WifiData->curMode = WIFIMODE_NORMAL;
+                 WLOG_PUTS("T: Initialized\n");
+                 WLOG_FLUSH();
++                break;
++            }
++
++            init_ticks++;
++            if (init_ticks >= INIT_POLL_TICKS && (init_ticks % 10) == 0)
++                dspico_card_poll();
++            if ((init_ticks >= INIT_RESTART_TICKS || !dspico_card_started()) &&
++                init_restarts < INIT_MAX_RESTARTS)
++            {
++                init_restarts++;
++                init_ticks = 0;
++                WifiData->a7_diag[DSPICO_A7D_INIT_RESTARTS]++;
++                Wifi_TWL_Stop();
++                Wifi_TWL_Start();
+             }
+             break;
+         }
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index 187e413..21d536e 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -355,12 +355,12 @@ void Wifi_A7Info(u32 out[16])
+         out[i] = WifiData ? WifiData->a7_info[i] : 0;
+ }
+ 
+-// dspico-romm: connect diagnostics (DSPICO_A7D_*). out[16] = curMode.
+-void Wifi_A7Diag(u32 out[17])
++// dspico-romm: connect diagnostics (DSPICO_A7D_*). out[24] = curMode.
++void Wifi_A7Diag(u32 out[25])
+ {
+-    for (int i = 0; i < 16; i++)
++    for (int i = 0; i < 24; i++)
+         out[i] = WifiData ? WifiData->a7_diag[i] : 0;
+-    out[16] = WifiData ? (u32)WifiData->curMode : 0xFF;
++    out[24] = WifiData ? (u32)WifiData->curMode : 0xFF;
+ }
+ 
+ // dspico-romm: ARM7 breakdown counters (see arm7/twl/card.twl.c A7P_*).
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index 9ac3626..902cec3 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -290,7 +290,7 @@ typedef struct WIFI_MAINSTRUCT
+     u32 a7_opts;
+     u32 a7_info[16];
+     // dspico-romm: connect diagnostics (DSPICO_A7D_*), counted by the ARM7
+-    u32 a7_diag[16];
++    u32 a7_diag[24];
+ 
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+@@ -338,6 +338,10 @@ enum {
+     DSPICO_A7D_ERRORS,       // CMD_ERROR count | last TARGET_ERROR id << 16
+     DSPICO_A7D_CONN,         // CONNECT count | DISCONNECT << 8 | reason << 16
+     DSPICO_A7D_STARTS,       // Card inits (Wifi_TWL_Start)
++    DSPICO_A7D_INIT_RESTARTS,// Card re-inits by the init watchdog
++    DSPICO_A7D_POLL_HITS,    // Init: pending interrupts found by polling
++    DSPICO_A7D_FW_TIMEOUT,   // Firmware "ready" flag never set (timeouts)
++    DSPICO_A7D_INIT_MS,      // Time from card init to WMI ready (last), ms
+ };
+ 
+ // dspico-romm: DSi RX ring entry whose data was written by SDIO DMA. The

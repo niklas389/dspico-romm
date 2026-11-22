@@ -248,24 +248,34 @@ static u32 a7_opts_base(void)
 // a failed start stopped: card init, firmware, channel list, scan, connect.
 static void wifi_diag_log(void)
 {
-    extern void Wifi_A7Diag(u32 out[17]);
-    u32 d[17];
+    extern void Wifi_A7Diag(u32 out[25]);
+    extern void Wifi_A7Info(u32 out[16]);
+    u32 d[25], a7[16];
     Wifi_A7Diag(d);
-    log_printf("  init: starts %lu, SCFG_EXT %08lX, SCFG_WL %02lX>%02lX>%02lX,"
-               " CMD5 x%lu%s%s\n",
-               (unsigned long)d[15], (unsigned long)d[0],
-               (unsigned long)(d[1] & 0xFF), (unsigned long)((d[1] >> 8) & 0xFF),
-               (unsigned long)((d[1] >> 16) & 0xFF), (unsigned long)(d[2] >> 8),
+    Wifi_A7Info(a7);
+    char wl[16];
+    if (g_cfg.wifireset) // before > after off > after on
+        snprintf(wl, sizeof(wl), "%02lX>%02lX>%02lX", (unsigned long)(d[1] & 0xFF),
+                 (unsigned long)((d[1] >> 8) & 0xFF), (unsigned long)((d[1] >> 16) & 0xFF));
+    else // before > after on
+        snprintf(wl, sizeof(wl), "%02lX>%02lX", (unsigned long)(d[1] & 0xFF),
+                 (unsigned long)((d[1] >> 16) & 0xFF));
+    log_printf("  init: starts %lu, SCFG_EXT %08lX, SCFG_WL %s, CMD5 x%lu%s%s\n",
+               (unsigned long)d[15], (unsigned long)d[0], wl, (unsigned long)(d[2] >> 8),
                (d[2] & 1) ? " skipped" : "", (d[2] & 2) ? " 1-bit" : "");
-    log_printf("  fw: uploaded before %lX, reset cause %lX, ready %lu, regdomain %lu,"
-               " channels %lu\n",
-               (unsigned long)d[3], (unsigned long)d[4], (unsigned long)d[5],
-               (unsigned long)d[6], (unsigned long)d[7]);
+    log_printf("  fw: uploaded before %lX, reset cause %lX, ready timeouts %lu,"
+               " HTC ready %lu B, WMI ready %lu, regdomain %lu, channels %lu\n",
+               (unsigned long)d[3], (unsigned long)d[4], (unsigned long)d[18],
+               (unsigned long)a7[1], (unsigned long)d[5], (unsigned long)d[6],
+               (unsigned long)d[7]);
+    log_printf("  watchdog: %lu card re-inits, %lu IRQs found by polling,"
+               " WMI ready after %lu ticks (~ms)\n",
+               (unsigned long)d[16], (unsigned long)d[17], (unsigned long)d[19]);
     log_printf("  scan: %lu started, %lu done, %lu BSS (%lu low SNR), SNR max %lu"
                " last %lu, mode %lu\n",
                (unsigned long)d[8], (unsigned long)d[9], (unsigned long)d[10],
                (unsigned long)d[11], (unsigned long)(d[12] & 0xFF),
-               (unsigned long)((d[12] >> 8) & 0xFF), (unsigned long)d[16]);
+               (unsigned long)((d[12] >> 8) & 0xFF), (unsigned long)d[24]);
     log_printf("  conn: %lu connect, %lu disconnect (last reason %lu),"
                " cmd errors %lu, target error %lX\n",
                (unsigned long)(d[14] & 0xFF), (unsigned long)((d[14] >> 8) & 0xFF),
@@ -277,12 +287,9 @@ static void wifi_diag_log(void)
     for (int i = 0; i < n && k < 16; i++)
         if (Wifi_GetAPData(i, &aps[k]) == WIFI_RETURN_OK)
             k++;
-    Wifi_AccessPoint match;
-    int m = k ? Wifi_FindMatchingAP(k, aps, &match) : -1;
-    log_printf("  APs: %d listed, saved AP %s\n", n, m >= 0 ? "found" : "not found");
+    log_printf("  APs: %d listed\n", n);
     for (int i = 0; i < k && i < 8; i++)
-        log_printf("   %c ch %2u rssi %4d sec %u %.12s\n", i == m ? '*' : ' ',
-                   aps[i].channel, aps[i].rssi, (unsigned)aps[i].security_type,
+        log_printf("    ch %2u rssi %4d sec %u %.12s\n", aps[i].channel, aps[i].rssi, (unsigned)aps[i].security_type,
                    aps[i].ssid);
 }
 #endif
