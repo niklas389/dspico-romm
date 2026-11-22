@@ -996,6 +996,44 @@ static void dir_list_load(const char *folder, dir_list_t *d)
     qsort(d->names, d->count, sizeof(char *), cmp_str);
 }
 
+// File name stem reduced to lower-case letters and digits (accents folded),
+// e.g. "Pokémon - White (USA, Europe)" -> "pokemonwhiteusaeurope"
+static void norm_stem(const char *name, char *out, int len)
+{
+    const char *dot = strrchr(name, '.');
+    const unsigned char *p = (const unsigned char *)name;
+    int n = 0;
+    while (*p && (!dot || (const char *)p < dot) && n < len - 1)
+    {
+        unsigned c = *p++;
+        if (c == 0xC3 && *p)
+        {
+            unsigned d = *p++ | 0x20;
+            c = (d >= 0xA0 && d <= 0xA5) ? 'a' : d == 0xA7 ? 'c'
+              : (d >= 0xA8 && d <= 0xAB) ? 'e' : (d >= 0xAC && d <= 0xAF) ? 'i'
+              : d == 0xB1 ? 'n' : ((d >= 0xB2 && d <= 0xB6) || d == 0xB8) ? 'o'
+              : (d >= 0xB9 && d <= 0xBC) ? 'u' : 0;
+        }
+        else if (c >= 'A' && c <= 'Z')
+            c |= 0x20;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            out[n++] = (char)c;
+    }
+    out[n] = 0;
+}
+
+static bool is_rom_file(const char *name)
+{
+    static const char *ext[] = { "nds", "dsi", "srl", "gba", "gbc", "gb" };
+    const char *dot = strrchr(name, '.');
+    if (!dot)
+        return false;
+    for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+        if (strcasecmp(dot + 1, ext[i]) == 0)
+            return true;
+    return false;
+}
+
 static bool dir_list_has(const dir_list_t *d, const char *name)
 {
     return d->count &&
@@ -1495,6 +1533,55 @@ static bool games_build(games_t *g)
                     g->on_sd[i] = dir_list_has(&onsd, tab + 1);
         }
         fclose(f);
+    }
+    // Last resort: same name apart from punctuation, case and accents (ROMs
+    // unpacked or copied with a slightly different name)
+    char (*stems)[96] = onsd.count ? malloc(onsd.count * sizeof(*stems)) : NULL;
+    if (stems)
+    {
+        for (int j = 0; j < onsd.count; j++)
+        {
+            stems[j][0] = 0;
+            if (is_rom_file(onsd.names[j]))
+                norm_stem(onsd.names[j], stems[j], sizeof(stems[j]));
+        }
+        for (int i = 0; i < n; i++)
+        {
+            if (g->on_sd[i])
+                continue;
+            char st[96];
+            norm_stem(g->idx.e[i].fs_name, st, sizeof(st));
+            for (int j = 0; st[0] && j < onsd.count; j++)
+                if (strcmp(st, stems[j]) == 0)
+                {
+                    g->on_sd[i] = true;
+                    log_printf("[Library] %s: matched %s\n", g->idx.e[i].fs_name, onsd.names[j]);
+                    break;
+                }
+        }
+        free(stems);
+    }
+    // Diagnostics: ROM files in the folder that match no game
+    int unmatched = 0;
+    for (int j = 0; j < onsd.count && unmatched < 8; j++)
+    {
+        if (!is_rom_file(onsd.names[j]))
+            continue;
+        bool used = false;
+        for (int i = 0; i < n && !used; i++)
+        {
+            char cand[256];
+            for (int k = 0; !used && download_local_name(g->folder, g->idx.e[i].fs_name, k,
+                                                         cand, sizeof(cand));
+                 k++)
+                used = strcasecmp(cand, onsd.names[j]) == 0;
+        }
+        if (!used)
+        {
+            log_printf("[Library] roms/%s/%s: no exact match in RomM\n", g->folder,
+                       onsd.names[j]);
+            unmatched++;
+        }
     }
     for (int i = 0; i < n; i++)
         games_tiles(g, i);
