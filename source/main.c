@@ -100,7 +100,7 @@ static void press_any_key(void)
     wait_key();
 }
 
-static void wifi_shutdown(void);
+static bool wifi_shutdown(void);
 
 static void fatal(const char *msg)
 {
@@ -220,33 +220,34 @@ static void step_system_info(void)
 static bool g_wifi_up;
 
 // Shuts the Wi-Fi hardware and library down (also before exiting, so the
-// next start finds the module idle).
-static void wifi_shutdown(void)
+// next start finds the module idle). Wifi_Deinit() refuses until the ARM7
+// has really reached "disabled", so it is retried for up to ~3 s. Returns
+// false if the library could not be stopped (then it must not be
+// initialized again: DSWiFi asserts).
+static bool wifi_shutdown(void)
 {
     if (!g_wifi_up)
-        return;
+        return true;
     Wifi_DisconnectAP();
     Wifi_DisableWifi();
-    for (int i = 0; i < 6; i++)
+    for (int frames = 0; frames < 3 * 60; frames++)
+    {
         swiWaitForVBlank();
-    Wifi_Deinit();
-    g_wifi_up = false;
+        if (Wifi_Deinit())
+        {
+            g_wifi_up = false;
+            return true;
+        }
+    }
+    log_printf("Wi-Fi: library could not be stopped (ARM7 not responding)\n");
+    return false;
 }
 
-// One connection attempt with our own timeout (Wifi_InitDefault with
-// WFC_CONNECT blocks). Logs each association state change.
-static bool wifi_try_connect(int attempt)
+// Waits up to ~20 s for the association, logging each state change.
+static bool wifi_wait_assoc(int attempt)
 {
-    if (!Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
-    {
-        log_printf("Wi-Fi: init failed (attempt %d)\n", attempt);
-        return false;
-    }
-    g_wifi_up = true;
-    Wifi_AutoConnect();
-
     int last = -1;
-    for (int frames = 0; frames < 20 * 60; frames++) // ~20 s
+    for (int frames = 0; frames < 20 * 60; frames++)
     {
         int st = Wifi_AssocStatus();
         if (st != last)
@@ -267,7 +268,9 @@ static bool wifi_try_connect(int attempt)
     u32 a7[16];
     Wifi_A7Info(a7);
     log_printf("Wi-Fi: attempt %d failed, BMI target 0x%08lX%s\n", attempt,
-               (unsigned long)a7[0], a7[0] == 0xFFFFFFFF ? " (module not answering)" : "");
+               (unsigned long)a7[0],
+               a7[0] == 0xFFFFFFFF ? " (module not answering)"
+               : a7[0] == 0 ? " (module not initialized)" : "");
 #else
     log_printf("Wi-Fi: attempt %d failed\n", attempt);
 #endif
@@ -277,27 +280,46 @@ static bool wifi_try_connect(int attempt)
 static void step_wifi(void)
 {
     log_printf("Wi-Fi: connecting...\n");
+    const char *msg = "Wi-Fi connect failed.\n"
+                      "Set up the AP in DSi System\n"
+                      "Settings (slot 4-6 for WPA2).\n"
+                      "If it worked before: switch\n"
+                      "the DSi off and on.";
 
-    // The module sometimes does not come up when the app is started again
-    // without a power cycle: shut everything down and try again.
-    bool ok = false;
-    for (int attempt = 1; attempt <= 3 && !ok; attempt++)
+    if (!Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
+        fatal(msg);
+    g_wifi_up = true;
+    Wifi_AutoConnect();
+    bool ok = wifi_wait_assoc(1);
+
+    if (!ok)
     {
-        if (attempt > 1)
-        {
-            printf("Wi-Fi: retry %d of 3...\n", attempt);
-            wifi_shutdown();
-            for (int i = 0; i < 60; i++)
-                swiWaitForVBlank();
-        }
-        ok = wifi_try_connect(attempt);
+        // 2: same library instance, new association attempt
+        printf("Wi-Fi: retry 2 of 3...\n");
+        Wifi_DisconnectAP();
+        for (int i = 0; i < 60; i++)
+            swiWaitForVBlank();
+        Wifi_AutoConnect();
+        ok = wifi_wait_assoc(2);
     }
     if (!ok)
-        fatal("Wi-Fi connect failed.\n"
-              "Set up the AP in DSi System\n"
-              "Settings (slot 4-6 for WPA2).\n"
-              "If it worked before: switch\n"
-              "the DSi off and on.");
+    {
+        // 3: full restart of the library and the module, if it stops
+        printf("Wi-Fi: retry 3 of 3...\n");
+        if (wifi_shutdown())
+        {
+            for (int i = 0; i < 60; i++)
+                swiWaitForVBlank();
+            if (Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
+            {
+                g_wifi_up = true;
+                Wifi_AutoConnect();
+                ok = wifi_wait_assoc(3);
+            }
+        }
+    }
+    if (!ok)
+        fatal(msg);
 
     // Wifi_InitDefault() can return before DHCP has finished: wait for the
     // address (the ARM7 receive options below are only enabled afterwards).
