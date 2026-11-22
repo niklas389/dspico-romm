@@ -74,8 +74,33 @@ static void rotate_logs(const char *path)
 static bool g_quit;          // START: leave the app
 static bool g_console;       // Bottom screen shows the text console
 
+static bool g_wifi_up;
+static bool g_top_header;    // Top screen has the status bar (clock, Wi-Fi)
+static uint32_t g_frames;
+static const char *clock_str(void);
+
+// Wi-Fi icon level: -1 not connected, 1..3 bars from the RSSI value.
+// DSWiFi documents 0..255 for WIFIGETDATA_RSSI; the thresholds are a first
+// guess (logged at connect for calibration).
+static int wifi_level(void)
+{
+    if (!g_wifi_up)
+        return -2;
+    if (Wifi_AssocStatus() != ASSOCSTATUS_ASSOCIATED)
+        return -1;
+    int r = Wifi_GetData(WIFIGETDATA_RSSI, 0, NULL);
+    return r >= 40 ? 3 : r >= 25 ? 2 : 1;
+}
+
 static void frame(void)
 {
+    if (++g_frames % 60 == 0)
+    {
+        // Clock and Wi-Fi state once a second
+        ui_wifi_level = wifi_level();
+        if (g_top_header)
+            ui_top_header(gfx_top, "RomM", clock_str());
+    }
     gfx_present(); // Waits for VBlank (other threads run meanwhile)
     scanKeys();
 }
@@ -153,6 +178,7 @@ static bool wifi_shutdown(void);
 
 static void splash_top(const char *line)
 {
+    g_top_header = false;
     ui_draw_splash_top(gfx_top, "Version " POC_VERSION, line);
 }
 
@@ -247,8 +273,6 @@ static void step_system_info(void)
     log_printf("RTC: %s\n", ts);
     log_printf("(wrong clock breaks cert check)\n");
 }
-
-static bool g_wifi_up;
 
 // Disconnects and switches the Wi-Fi hardware off (the ARM7 shuts the card
 // down; the next Wifi_AutoConnect() initializes it again from scratch).
@@ -433,6 +457,7 @@ static void step_wifi(void)
              (unsigned long)((ip >> 8) & 0xFF), (unsigned long)((ip >> 16) & 0xFF),
              (unsigned long)((ip >> 24) & 0xFF));
     step_mark(ST_WIFI, 2, ips);
+    log_printf("Wi-Fi RSSI value: %d\n", Wifi_GetData(WIFIGETDATA_RSSI, 0, NULL));
 
 #ifdef DSPICO_DSWIFI
     // DSWiFi defaults to 1300, so lwIP advertises an MSS of 1260 and every
@@ -627,6 +652,7 @@ static void step_pair(void)
     log_file_only("Pair URL: %s\n", url);
     cJSON_Delete(root);
 
+    g_top_header = false;
     if (!top_show_qr(url))
         splash_top("URL too long for a QR code");
 
@@ -798,6 +824,21 @@ static void log_extract(const extract_result_t *x)
         log_printf("  %s%s\n", x->error, x->zip_removed ? " (archive deleted)" : "");
 }
 
+// <base>/library.txt: "<rom id>\t<file name>" per completed download, so a
+// game is found on the SD card whatever its file is called.
+static void lib_record(int rom_id, const char *path)
+{
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    char lp[CFG_PATH_MAX + 32];
+    config_path(&g_cfg, "library.txt", lp, sizeof(lp));
+    FILE *f = fopen(lp, "ab");
+    if (!f)
+        return;
+    fprintf(f, "%d\t%s\n", rom_id, name);
+    fclose(f);
+}
+
 // Downloads a ROM into <drive>/roms/<folder>/ (download.c). Archives are
 // extracted afterwards. ask: confirm before replacing a ROM on the SD card.
 static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
@@ -882,6 +923,7 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
         }
         if (!archive)
         {
+            lib_record(rom_id, r.path);
             char body[200];
             snprintf(body, sizeof(body), "%lu KB/s on average. Saved in roms/%s/.",
                      (unsigned long)kbps, folder);
@@ -896,6 +938,7 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
     log_extract(&x);
     if (x.ok)
     {
+        lib_record(rom_id, x.path);
         char body[320];
         snprintf(body, sizeof(body), "%s is in roms/%s/.", x.path[0] ? strrchr(x.path, '/') + 1
                                                                       : x.entry, folder);
@@ -917,9 +960,10 @@ typedef struct
     int count;
 } dir_list_t;
 
+// Case-insensitive: FAT names are, and names written on a PC may differ in case
 static int cmp_str(const void *a, const void *b)
 {
-    return strcmp(*(char *const *)a, *(char *const *)b);
+    return strcasecmp(*(char *const *)a, *(char *const *)b);
 }
 
 static void dir_list_load(const char *folder, dir_list_t *d)
@@ -1430,8 +1474,30 @@ static bool games_build(games_t *g)
         g->tiles[i] = (ui_tile_t){ e->name, g->labels[i], ui_name_color(e->name), NULL, 0, 0, 0 };
         g->letter[i] = (int8_t)ui_letter_of(e->name);
         g->letters[g->letter[i]] = true;
-        games_tiles(g, i);
     }
+
+    // Downloads recorded in library.txt (file name may differ from RomM's)
+    char lp[CFG_PATH_MAX + 32];
+    config_path(&g_cfg, "library.txt", lp, sizeof(lp));
+    FILE *f = fopen(lp, "rb");
+    if (f)
+    {
+        char line[320];
+        while (fgets(line, sizeof(line), f))
+        {
+            char *tab = strchr(line, '\t');
+            if (!tab)
+                continue;
+            tab[strcspn(tab, "\r\n")] = 0;
+            int id = atoi(line);
+            for (int i = 0; i < n; i++)
+                if (g->idx.e[i].id == id && !g->on_sd[i])
+                    g->on_sd[i] = dir_list_has(&onsd, tab + 1);
+        }
+        fclose(f);
+    }
+    for (int i = 0; i < n; i++)
+        games_tiles(g, i);
     dir_list_free(&onsd);
     return true;
 }
@@ -1492,7 +1558,9 @@ static void game_top(games_t *g, int sel, const char *summary)
         else
             t.save = "checking...";
     }
+    ui_wifi_level = wifi_level();
     ui_draw_game_top(gfx_top, &t);
+    g_top_header = true;
 }
 
 // Summary from the metadata file (first paragraph after the key lines)
@@ -1764,12 +1832,13 @@ static void browse_platform(int platform_id, const char *platform_name,
                 game_top(&g, sel, summary);
             }
 
-            snprintf(sub, sizeof(sub), "%d game%s%s", g.idx.count, g.idx.count == 1 ? "" : "s",
-                     bg_running ? "  \xC2\xB7  updating" : offline ? "  \xC2\xB7  offline" : "");
+            snprintf(sub, sizeof(sub), "%d game%s", g.idx.count, g.idx.count == 1 ? "" : "s");
             ui_strip_t s = { platform_name, sub, g.tiles, g.idx.count, sel, pos, NULL, g.letters,
                              g.letter[sel],
                              g.on_sd[sel] ? "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A details  Y save  B back"
                                           : "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A download  Y save  B back" };
+            s.status = bg_running ? 1 : offline ? 2 : 0;
+            s.anim = (int)g_frames;
             ui_draw_strip(gfx_bot, &s);
             frame();
             strip_animate(&pos, sel);
@@ -1989,7 +2058,9 @@ static void step_platforms(void)
                 p->on_sd = count_files(p->folder);
             ui_platform_t t = { p->name, p->label, p->folder, p->roms, p->on_sd, hid_sel,
                                 g_sync_note[0] ? g_sync_note : NULL, clock_str() };
+            ui_wifi_level = wifi_level();
             ui_draw_platform_top(gfx_top, &t);
+            g_top_header = true;
             shown = map[sel];
         }
 

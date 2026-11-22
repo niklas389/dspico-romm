@@ -39,6 +39,9 @@ void ui_initials(const char *name, char *out, int len);
 
 // --- Top screen ---------------------------------------------------------------
 
+// Wi-Fi icon in the top bar: -2 hidden, -1 not connected, 0..3 signal bars
+extern int ui_wifi_level;
+
 void ui_top_header(uint16_t *fb, const char *left, const char *right);
 
 typedef struct
@@ -107,6 +110,8 @@ typedef struct
     const bool *letters;     // 27 entries ('#', 'A'..'Z'), NULL: no letter bar
     int letter;              // Current letter index
     const char *hint;
+    int status;              // 0, 1 = updating (animated), 2 = offline
+    int anim;                // Frame counter for the animation
 } ui_strip_t;
 
 void ui_draw_strip(uint16_t *fb, const ui_strip_t *s);

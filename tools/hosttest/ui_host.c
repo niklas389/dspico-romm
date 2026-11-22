@@ -72,10 +72,12 @@ int main(int argc, char **argv)
         .year = 2007, .size = 64u << 20, .on_sd = true, .save = "conflict",
         .save_kind = UI_WARN, .clock = "19:42",
     };
+    ui_wifi_level = 2;
     ui_draw_game_top(gfx_top, &g);
     ui_strip_t s = { "Nintendo DS", "11 games", tiles, n, 1, 1 * 256,
                      "64.0 MB  \xC2\xB7  on SD card", letters, ui_letter_of(names[1]),
-                     "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A download  Y save  B back" };
+                     "\xE2\x97\x80\xE2\x96\xB6 game  L/R letter  A download  Y save  B back", 0, 0 };
+    s.status = 1;
     ui_draw_strip(gfx_bot, &s);
     save("games");
 
@@ -108,7 +110,7 @@ int main(int argc, char **argv)
                         "Saves: 2 uploaded, 1 downloaded, 1 conflict", "19:42" };
     ui_draw_platform_top(gfx_top, &p);
     ui_strip_t ps = { "Platforms", "6 shown", pt, 6, 1, 256, "48 games  \xC2\xB7  12 on SD",
-                      NULL, 0, "A open  Y show hidden  SELECT menu  START quit" };
+                      NULL, 0, "A open  Y show hidden  SELECT menu  START quit", 0, 0 };
     ui_draw_strip(gfx_bot, &ps);
     save("platforms");
 

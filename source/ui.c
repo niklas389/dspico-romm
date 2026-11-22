@@ -116,12 +116,33 @@ static void format_size(uint64_t bytes, char *out, size_t len)
 
 // --- Top screen -------------------------------------------------------------------
 
+int ui_wifi_level = -2;
+
+// Three signal bars; level -1 = not connected (crossed out)
+static void wifi_icon(uint16_t *fb, int x, int y, int level)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        int h = 4 + 3 * i;
+        gfx_color_t c = level > i ? UI_WHITE : gfx_mix(UI_WHITE, UI_ACCENT, 90);
+        gfx_fill(fb, x + i * 4, y + 11 - h, 3, h, c);
+    }
+    if (level < 0)
+    {
+        for (int i = 0; i < 9; i++) // Diagonal stroke
+            gfx_fill(fb, x + 1 + i, y + 2 + i, 2, 1, UI_RED);
+    }
+}
+
 void ui_top_header(uint16_t *fb, const char *left, const char *right)
 {
     gfx_vgrad(fb, 0, 0, GFX_W, 16, UI_ACCENT_HI, UI_ACCENT);
     gfx_text(fb, &font_bold, 5, 1, UI_WHITE, left, GFX_LEFT, 160);
+    int x = GFX_W - 5;
     if (right)
-        gfx_text(fb, &font_bold, GFX_W - 5, 1, UI_WHITE, right, GFX_RIGHT, 90);
+        x -= gfx_text(fb, &font_bold, x, 1, UI_WHITE, right, GFX_RIGHT, 90) + 6;
+    if (ui_wifi_level > -2)
+        wifi_icon(fb, x - 11, 2, ui_wifi_level);
 }
 
 void ui_draw_game_top(uint16_t *fb, const ui_game_t *g)
@@ -273,8 +294,24 @@ void ui_draw_strip(uint16_t *fb, const ui_strip_t *s)
     // Title panel
     gfx_rrect(fb, 4, 4, GFX_W - 8, 20, 7, UI_PANEL, UI_LINE, 1);
     gfx_text(fb, &font_bold, 11, 7, UI_TEXT, s->title, GFX_LEFT, 150);
+    int sx = GFX_W - 11;
     if (s->subtitle)
-        gfx_text(fb, &font_small, GFX_W - 11, 7, UI_MUTED, s->subtitle, GFX_RIGHT, 90);
+        sx -= gfx_text(fb, &font_small, sx, 7, UI_MUTED, s->subtitle, GFX_RIGHT, 90) + 7;
+    if (s->status == 1)
+    {
+        // Updating: three pulsing dots
+        for (int i = 0; i < 3; i++)
+        {
+            bool on = (s->anim / 8) % 3 == i;
+            gfx_circle(fb, sx - 16 + i * 6, 14, 2, on ? UI_ACCENT : UI_FAINT);
+        }
+    }
+    else if (s->status == 2)
+    {
+        // Offline: orange "!"
+        gfx_circle(fb, sx - 5, 14, 6, UI_ORANGE);
+        gfx_text(fb, &font_bold, sx - 5, 8, UI_WHITE, "!", GFX_CENTER, 0);
+    }
 
     if (s->count == 0)
     {
