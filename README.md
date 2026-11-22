@@ -175,6 +175,7 @@ artifacts.
 ## Reporting results
 
 After a run, send back `<SD>/romm/poc.log`. It contains the timings, TLS
+details and errors. The token is never written to the log.
+
 Each start keeps the previous four logs as `<name>.1.log` (newest) to
 `<name>.4.log`.
-details and errors. The token is never written to the log.
