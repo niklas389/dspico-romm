@@ -8,6 +8,8 @@
 // Opens the log file on the SD card. Console output works without it.
 void log_open(const char *path);
 void log_close(void);
+// Writes the log to the SD card now (file size included).
+void log_sync(void);
 
 // Prints to the bottom-screen console and appends to the log file.
 void log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

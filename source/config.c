@@ -77,6 +77,7 @@ bool config_load(config_t *cfg)
     cfg->zerocopy = true;
     cfg->a7cmd53 = true;
     cfg->a7dma = true;
+    cfg->wifireset = true;
     cfg->sdraw = true;
 
     if (!find_base_dir(cfg))
@@ -140,6 +141,10 @@ bool config_load(config_t *cfg)
         else if (strcasecmp(key, "a7dma") == 0)
         {
             cfg->a7dma = parse_bool(val);
+        }
+        else if (strcasecmp(key, "wifireset") == 0)
+        {
+            cfg->wifireset = parse_bool(val);
         }
         else if (strcasecmp(key, "mtu") == 0)
         {

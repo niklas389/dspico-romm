@@ -219,29 +219,28 @@ static void step_system_info(void)
 
 static bool g_wifi_up;
 
-// Shuts the Wi-Fi hardware and library down (also before exiting, so the
-// next start finds the module idle). Wifi_Deinit() refuses until the ARM7
-// has really reached "disabled", so it is retried for up to ~3 s. Returns
-// false if the library could not be stopped (then it must not be
-// initialized again: DSWiFi asserts).
+// Disconnects and switches the Wi-Fi hardware off (the ARM7 shuts the card
+// down; the next Wifi_AutoConnect() initializes it again from scratch).
+// Wifi_Deinit() is not usable with lwIP in this DSWiFi version (it crashes:
+// "DSWifi can't be disabled if lwIP is active").
 static bool wifi_shutdown(void)
 {
     if (!g_wifi_up)
         return true;
     Wifi_DisconnectAP();
     Wifi_DisableWifi();
-    for (int frames = 0; frames < 3 * 60; frames++)
-    {
+    for (int i = 0; i < 60; i++) // Let the ARM7 reach "disabled"
         swiWaitForVBlank();
-        if (Wifi_Deinit())
-        {
-            g_wifi_up = false;
-            return true;
-        }
-    }
-    log_printf("Wi-Fi: library could not be stopped (ARM7 not responding)\n");
-    return false;
+    return true;
 }
+
+#ifdef DSPICO_DSWIFI
+extern void Wifi_A7SetOpts(u32 opts);
+static u32 a7_opts_base(void)
+{
+    return g_cfg.wifireset ? 4u : 0u; // DSPICO_A7_OPT_HWRESET
+}
+#endif
 
 // Waits up to ~20 s for the association, logging each state change.
 static bool wifi_wait_assoc(int attempt)
@@ -289,8 +288,15 @@ static void step_wifi(void)
     if (!Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
         fatal(msg);
     g_wifi_up = true;
+#ifdef DSPICO_DSWIFI
+    // Before the first AutoConnect: the ARM7 initializes the card then
+    Wifi_A7SetOpts(a7_opts_base());
+    log_printf("Wi-Fi: module reset %s\n", g_cfg.wifireset ? "on" : "off");
+#endif
+    log_sync();
     Wifi_AutoConnect();
     bool ok = wifi_wait_assoc(1);
+    log_sync();
 
     if (!ok)
     {
@@ -304,19 +310,13 @@ static void step_wifi(void)
     }
     if (!ok)
     {
-        // 3: full restart of the library and the module, if it stops
+        // 3: switch the hardware off and initialize the card again (with
+        // the module reset if enabled)
         printf("Wi-Fi: retry 3 of 3...\n");
-        if (wifi_shutdown())
-        {
-            for (int i = 0; i < 60; i++)
-                swiWaitForVBlank();
-            if (Wifi_InitDefault(INIT_ONLY | WIFI_ATTEMPT_DSI_MODE))
-            {
-                g_wifi_up = true;
-                Wifi_AutoConnect();
-                ok = wifi_wait_assoc(3);
-            }
-        }
+        log_sync();
+        wifi_shutdown();
+        Wifi_AutoConnect();
+        ok = wifi_wait_assoc(3);
     }
     if (!ok)
         fatal(msg);
@@ -357,7 +357,7 @@ static void step_wifi(void)
     // ARM7 receive options (patches/dswifi-arm7-rx-dma.patch), applied by
     // the ARM7 only while connected.
     extern void Wifi_A7SetOpts(u32 opts);
-    Wifi_A7SetOpts((g_cfg.a7cmd53 ? 1u : 0u) | (g_cfg.a7dma ? 2u : 0u));
+    Wifi_A7SetOpts(a7_opts_base() | (g_cfg.a7cmd53 ? 1u : 0u) | (g_cfg.a7dma ? 2u : 0u));
     log_printf("ARM7 RX: cmd53 %s, DMA to ring %s\n", g_cfg.a7cmd53 ? "on" : "off",
                g_cfg.a7dma ? "on" : "off");
     wifi_fw_log();
@@ -411,7 +411,7 @@ static void step_heartbeat(void)
     {
         // Safety net for the ARM7 receive options: back to the proven path
         extern void Wifi_A7SetOpts(u32 opts);
-        Wifi_A7SetOpts(0);
+        Wifi_A7SetOpts(a7_opts_base());
         g_cfg.a7cmd53 = g_cfg.a7dma = false;
         log_printf("ARM7 RX options turned OFF (first request failed), retrying\n");
         buf_free(&body);

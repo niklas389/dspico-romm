@@ -25,6 +25,11 @@ zerocopy=1
 a7cmd53=1
 a7dma=1
 
+; 1 = switch the Wi-Fi module off and on (SCFG_WL) before it is initialized.
+; Meant for "stuck at searching" after restarting the app without switching
+; the DSi off. Set to 0 if Wi-Fi does not start at all with it.
+wifireset=1
+
 ; 1 = skip certificate verification. Diagnostics only.
 insecure=0
 
