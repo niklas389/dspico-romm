@@ -38,7 +38,7 @@ typedef bool (*zip_progress_fn)(void *ctx, uint64_t done, uint64_t total);
 typedef struct
 {
     uint64_t in_bytes, out_bytes;
-    uint64_t read_us;        // fread() of the archive
+    uint64_t read_us;        // Waiting for archive data
     uint64_t inflate_us;     // inflate() or copy
     uint64_t crc_us;
     uint64_t sink_us;        // Waiting for space in the sink
@@ -63,6 +63,23 @@ bool zip_find_rom_r(const zip_reader_t *r, const char *exts, zip_entry_t *e,
 
 bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
                  zip_progress_fn cb, void *ctx, zip_stats_t *st);
+
+// Input for zip_extract_src: the entry's compressed bytes in order. get
+// returns the next contiguous piece (1), 0 at the end, -1 on errors; the
+// piece stays valid until consume(n) is called with its size.
+typedef struct
+{
+    int (*get)(void *ctx, const uint8_t **p, size_t *n);
+    void (*consume)(void *ctx, size_t n);
+    void *ctx;
+} zip_source_t;
+
+// File offset of the entry's data (after the local header).
+bool zip_data_offset(FILE *f, const zip_entry_t *e, uint64_t *off);
+
+bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
+                     const zip_sink_t *sink, zip_progress_fn cb, void *ctx,
+                     zip_stats_t *st);
 
 // True for file names the library stores as archives (.zip).
 bool zip_is_archive_name(const char *name);

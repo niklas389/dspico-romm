@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "sdwriter.h"
 
+#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -89,11 +90,16 @@ static bool raw_write(sdwriter_t *w, const uint8_t *src, size_t n)
         if (sectors > run)
             sectors = run;
 
-        if (!sdraw_async_start(lba, p, sectors))
+        static sdraw_op_t op;
+        op.write = true;
+        op.lba = lba;
+        op.count = sectors;
+        op.buf = (void *)p;
+        if (!sdraw_op_submit(&op))
             return false;
-        while (sdraw_async_busy())
+        while (sdraw_op_pending(&op))
             cothread_yield(); // The network thread runs meanwhile
-        if (!sdraw_async_ok())
+        if (op.state != SDRAW_OP_DONE)
             return false;
 
         size_t bytes = sectors * 512 < n ? sectors * 512 : n;
@@ -161,7 +167,7 @@ sdwriter_t *sdw_open(FILE *fp, size_t ring_size, size_t chunk)
     sdwriter_t *w = calloc(1, sizeof(*w));
     if (!w)
         return NULL;
-    w->ring = malloc(ring_size);
+    w->ring = memalign(32, ring_size); // Cache lines (raw DMA)
     if (!w->ring)
     {
         free(w);

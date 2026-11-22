@@ -34,12 +34,31 @@ int sdraw_map(FILE *f, uint32_t size, sdraw_extent_t *ext, int max_ext);
 // Returns false on a timeout. Drops libnds' cached copies of these sectors.
 bool sdraw_write(uint32_t lba, const void *src, uint32_t count, bool dma);
 
-// Interrupt-driven sequential write with DMA (card transfer IRQ + timer 1).
-// sdraw_async_init() also makes the DLDI driver wait while a write runs.
+// Interrupt-driven sequential writes and reads with DMA (card transfer IRQ +
+// timer 1). Operations are queued and run in order; the next one starts from
+// the IRQ handler. sdraw_async_init() also makes the DLDI driver wait while
+// operations are pending.
+enum { SDRAW_OP_QUEUED = 1, SDRAW_OP_RUNNING, SDRAW_OP_DONE, SDRAW_OP_ERROR };
+
+typedef struct sdraw_op
+{
+    bool write;
+    uint32_t lba;
+    uint32_t count;            // Sectors
+    void *buf;                 // 32-byte aligned (cache lines)
+    volatile int state;        // SDRAW_OP_*
+    struct sdraw_op *next;     // Queue link (internal)
+} sdraw_op_t;
+
 bool sdraw_async_init(void);
-bool sdraw_async_start(uint32_t lba, const void *src, uint32_t count);
-bool sdraw_async_busy(void);
-bool sdraw_async_ok(void);       // Last sequence completed without error
+// Queues op (fill write/lba/count/buf). The buffer must not be touched until
+// op->state is DONE or ERROR. False if op is invalid.
+bool sdraw_op_submit(sdraw_op_t *op);
+static inline bool sdraw_op_pending(const sdraw_op_t *op)
+{
+    return op->state == SDRAW_OP_QUEUED || op->state == SDRAW_OP_RUNNING;
+}
+bool sdraw_async_busy(void);     // Any operation queued or running
 void sdraw_async_stats(uint32_t *irqs, uint32_t *polls);
 
 #endif

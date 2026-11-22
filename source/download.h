@@ -50,7 +50,8 @@ typedef struct
 {
     bool ok;
     bool cancelled;
-    bool raw;
+    bool raw;               // Output written with the DSpico DMA writer
+    bool raw_read;          // Archive read with DSpico DMA read-ahead
     bool zip_removed;
     int entries;
     uint64_t in_bytes, out_bytes;

@@ -470,7 +470,8 @@ static void log_extract(const extract_result_t *x)
                x->ok ? "done" : (x->cancelled ? "cancelled" : "FAILED"),
                (unsigned long long)x->st.in_bytes, (unsigned long long)x->st.out_bytes,
                (unsigned long)x->ms, (unsigned long)kbps,
-               x->raw ? "DSpico DMA" : "DLDI", x->entries);
+               x->raw ? (x->raw_read ? "DSpico DMA read+write" : "DSpico DMA write")
+                      : "DLDI", x->entries);
     log_printf("  read %lu ms, inflate %lu ms, crc %lu ms, SD wait %lu ms\n",
                (unsigned long)(x->st.read_us / 1000), (unsigned long)(x->st.inflate_us / 1000),
                (unsigned long)(x->st.crc_us / 1000), (unsigned long)(x->st.sink_us / 1000));

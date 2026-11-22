@@ -3,12 +3,13 @@
 // Minimal zip reader for ROM archives (see unzip.h).
 
 #include "unzip.h"
+#include "crc32fast.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
-#include <zlib.h>
+#include "third_party/zlib/zlib.h" // Own copy (z_ prefix), see its README
 
 #ifdef __NDS__
 #include <nds.h>
@@ -33,6 +34,37 @@ static void yield(void)
 {
 }
 #endif
+
+// The inflate state (~7 KB, mostly the decoding tables) lives in ITCM: no
+// data cache misses on table lookups. The 32 KB window stays in main RAM.
+#ifdef __NDS__
+#define STATE_MEM ITCM_BSS
+#else
+#define STATE_MEM
+#endif
+static uint8_t itcm_state[7680] STATE_MEM __attribute__((aligned(8)));
+static bool itcm_state_used;
+
+static voidpf z_alloc(voidpf opaque, uInt items, uInt size)
+{
+    (void)opaque;
+    size_t n = (size_t)items * size;
+    if (!itcm_state_used && n <= sizeof(itcm_state))
+    {
+        itcm_state_used = true;
+        return itcm_state;
+    }
+    return malloc(n);
+}
+
+static void z_free(voidpf opaque, voidpf p)
+{
+    (void)opaque;
+    if (p == itcm_state)
+        itcm_state_used = false;
+    else
+        free(p);
+}
 
 #define IN_BUF    (64 * 1024)
 #define OUT_STEP  (32 * 1024)   // Output per inflate() call
@@ -248,41 +280,125 @@ bool zip_find_rom_r(const zip_reader_t *r, const char *exts, zip_entry_t *best,
     return true;
 }
 
+bool zip_data_offset(FILE *f, const zip_entry_t *e, uint64_t *off)
+{
+    uint8_t lh[30];
+    if (!read_at(f, e->local_offset, lh, sizeof(lh)) || rd32(lh) != 0x04034b50)
+        return false;
+    *off = e->local_offset + 30 + rd16(lh + 26) + rd16(lh + 28);
+    return true;
+}
+
+// --- FILE source (fread into a buffer) ---------------------------------------
+
+typedef struct
+{
+    FILE *f;
+    uint8_t *buf;
+    size_t pos, len;
+    uint64_t left;
+} file_src_t;
+
+static int file_get(void *ctx, const uint8_t **p, size_t *n)
+{
+    file_src_t *fs = ctx;
+    if (fs->pos == fs->len)
+    {
+        if (fs->left == 0)
+            return 0;
+        size_t want = fs->left < IN_BUF ? (size_t)fs->left : IN_BUF;
+        if (fread(fs->buf, 1, want, fs->f) != want)
+            return -1;
+        fs->left -= want;
+        fs->pos = 0;
+        fs->len = want;
+    }
+    *p = fs->buf + fs->pos;
+    *n = fs->len - fs->pos;
+    return 1;
+}
+
+static void file_consume(void *ctx, size_t n)
+{
+    ((file_src_t *)ctx)->pos += n;
+}
+
 bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
                  zip_progress_fn cb, void *ctx, zip_stats_t *st)
 {
-    memset(st, 0, sizeof(*st));
-
-    uint8_t lh[30];
-    if (!read_at(f, e->local_offset, lh, sizeof(lh)) || rd32(lh) != 0x04034b50)
+    uint64_t data;
+    if (!zip_data_offset(f, e, &data) || fseeko(f, (off_t)data, SEEK_SET) != 0)
     {
+        memset(st, 0, sizeof(*st));
         snprintf(st->error, sizeof(st->error), "bad local header");
         return false;
     }
-    uint64_t data = e->local_offset + 30 + rd16(lh + 26) + rd16(lh + 28);
-    if (fseeko(f, (off_t)data, SEEK_SET) != 0)
+    file_src_t fs = { f, malloc(IN_BUF), 0, 0, e->comp_size };
+    if (!fs.buf)
     {
-        snprintf(st->error, sizeof(st->error), "seek failed");
+        memset(st, 0, sizeof(*st));
+        snprintf(st->error, sizeof(st->error), "out of memory");
         return false;
     }
+    zip_source_t src = { file_get, file_consume, &fs };
+    bool ok = zip_extract_src(&src, e, sink, cb, ctx, st);
+    free(fs.buf);
+    return ok;
+}
 
-    uint8_t *in = NULL;
+// --- Extraction ---------------------------------------------------------------
+
+typedef struct
+{
+    const zip_source_t *src;
+    zip_stats_t *st;
+    size_t given;        // Bytes handed to the consumer from the current piece
+} in_t;
+
+// Next piece of input; 1 data, 0 end, -1 error. Releases the previous piece.
+static int next_input(in_t *in, const uint8_t **p, size_t *n)
+{
+    if (in->given)
+    {
+        in->src->consume(in->src->ctx, in->given);
+        in->given = 0;
+    }
+    uint64_t t0 = now_us();
+    int r = in->src->get(in->src->ctx, p, n);
+    in->st->read_us += now_us() - t0;
+    if (r > 0)
+    {
+        in->given = *n;
+        in->st->in_bytes += *n;
+    }
+    return r;
+}
+
+bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
+                     const zip_sink_t *sink, zip_progress_fn cb, void *ctx,
+                     zip_stats_t *st)
+{
+    memset(st, 0, sizeof(*st));
+    in_t in = { src, st, 0 };
+
     z_stream z;
     memset(&z, 0, sizeof(z));
     if (e->method == 8)
     {
-        in = malloc(IN_BUF);
-        if (!in || inflateInit2(&z, -MAX_WBITS) != Z_OK)
+        z.zalloc = z_alloc;
+        z.zfree = z_free;
+        if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
         {
-            free(in);
             snprintf(st->error, sizeof(st->error), "out of memory");
             return false;
         }
     }
 
-    uint64_t in_left = e->comp_size, out_left = e->size;
-    uint32_t crc = crc32(0, NULL, 0);
-    bool ok = true, ended = false;
+    uint64_t out_left = e->size;
+    uint32_t crc = 0;
+    bool ok = true, ended = false, in_end = false;
+    const uint8_t *sp = NULL; // Stored: current input piece
+    size_t sn = 0;
 
     while (ok && out_left > 0)
     {
@@ -301,37 +417,51 @@ bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
         if (avail > out_left)
             avail = (size_t)out_left;
 
-        size_t produced;
+        size_t produced = 0;
         if (e->method == 0)
         {
-            t0 = now_us();
-            produced = fread(out, 1, avail, f);
-            st->read_us += now_us() - t0;
-            st->in_bytes += produced;
-            if (produced != avail)
+            while (ok && produced < avail)
             {
-                snprintf(st->error, sizeof(st->error), "archive truncated");
-                ok = false;
+                if (sn == 0)
+                {
+                    int r = next_input(&in, &sp, &sn);
+                    if (r <= 0)
+                    {
+                        snprintf(st->error, sizeof(st->error),
+                                 r < 0 ? "archive read failed" : "archive truncated");
+                        ok = false;
+                        break;
+                    }
+                }
+                size_t k = sn < avail - produced ? sn : avail - produced;
+                t0 = now_us();
+                memcpy(out + produced, sp, k);
+                st->inflate_us += now_us() - t0;
+                sp += k;
+                sn -= k;
+                produced += k;
             }
         }
         else
         {
-            if (z.avail_in == 0 && in_left > 0)
+            if (z.avail_in == 0 && !in_end)
             {
-                size_t n = in_left < IN_BUF ? (size_t)in_left : IN_BUF;
-                t0 = now_us();
-                size_t got = fread(in, 1, n, f);
-                st->read_us += now_us() - t0;
-                if (got != n)
+                const uint8_t *p;
+                size_t n;
+                int r = next_input(&in, &p, &n);
+                if (r < 0)
                 {
                     snprintf(st->error, sizeof(st->error), "archive read failed");
                     ok = false;
                     break;
                 }
-                in_left -= n;
-                st->in_bytes += n;
-                z.next_in = in;
-                z.avail_in = (uInt)n;
+                if (r == 0)
+                    in_end = true;
+                else
+                {
+                    z.next_in = (Bytef *)p;
+                    z.avail_in = (uInt)n;
+                }
             }
             z.next_out = out;
             z.avail_out = (uInt)avail;
@@ -343,19 +473,17 @@ bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
                 ended = true;
             else if (ret != Z_OK && !(ret == Z_BUF_ERROR && produced))
             {
-                snprintf(st->error, sizeof(st->error), "inflate error %d%s%s", ret,
-                         z.msg ? ": " : "", z.msg ? z.msg : "");
-                ok = false;
-            }
-            else if (produced == 0 && z.avail_in == 0 && in_left == 0)
-            {
-                snprintf(st->error, sizeof(st->error), "compressed data truncated");
+                if (ret == Z_BUF_ERROR && in_end)
+                    snprintf(st->error, sizeof(st->error), "compressed data truncated");
+                else
+                    snprintf(st->error, sizeof(st->error), "inflate error %d%s%s", ret,
+                             z.msg ? ": " : "", z.msg ? z.msg : "");
                 ok = false;
             }
         }
 
         t0 = now_us();
-        crc = crc32(crc, out, (uInt)produced);
+        crc = crc32_fast(crc, out, produced);
         st->crc_us += now_us() - t0;
         sink->commit(sink->ctx, produced);
         out_left -= produced;
@@ -384,17 +512,25 @@ bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
         int ret = Z_OK;
         while (ret == Z_OK && z.avail_out == 1)
         {
-            if (z.avail_in == 0 && in_left > 0)
+            if (z.avail_in == 0 && !in_end)
             {
-                size_t n = in_left < IN_BUF ? (size_t)in_left : IN_BUF;
-                if (fread(in, 1, n, f) != n)
-                    break;
-                in_left -= n;
-                z.next_in = in;
-                z.avail_in = (uInt)n;
+                const uint8_t *p;
+                size_t n;
+                int r = next_input(&in, &p, &n);
+                if (r <= 0)
+                {
+                    in_end = true;
+                    if (r < 0)
+                        break;
+                }
+                else
+                {
+                    z.next_in = (Bytef *)p;
+                    z.avail_in = (uInt)n;
+                }
             }
             ret = inflate(&z, Z_NO_FLUSH);
-            if (ret == Z_BUF_ERROR && z.avail_in == 0 && in_left == 0)
+            if (ret == Z_BUF_ERROR && z.avail_in == 0 && in_end)
                 break;
         }
         if (ret != Z_STREAM_END || z.avail_out != 1)
@@ -412,6 +548,5 @@ bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
 
     if (e->method == 8)
         inflateEnd(&z);
-    free(in);
     return ok;
 }

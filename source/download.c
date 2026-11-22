@@ -15,6 +15,7 @@
 #include "dl.h"
 #include "log.h"
 #include "sdraw.h"
+#include "sdreader.h"
 #include "sdwriter.h"
 #include "unzip.h"
 
@@ -314,6 +315,20 @@ static void sink_commit(void *ctx, size_t n)
     sdw_commit(ctx, n);
 }
 
+static int raw_src_get(void *ctx, const uint8_t **p, size_t *n)
+{
+    return sdr_get(ctx, p, n);
+}
+
+static void raw_src_consume(void *ctx, size_t n)
+{
+    sdr_consume(ctx, n);
+}
+
+// Write sequences while unpacking: longer than for downloads, so the card
+// keeps writing while the CPU inflates (and the reader's reads queue between).
+#define UNZIP_WRITE_CHUNK (128 * 1024)
+
 bool download_extract(const config_t *cfg, const char *folder, const char *zip_name,
                       zip_progress_fn cb, void *ctx, extract_result_t *res)
 {
@@ -370,7 +385,23 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
         return false;
     }
 
-    sdwriter_t *w = res->raw ? sdw_open_raw(out, RING_SIZE, WRITE_CHUNK, ext, n_ext)
+    // Input: DSpico DMA read-ahead of the archive's sectors if possible
+    static sdraw_extent_t in_ext[64];
+    sdreader_t *rd = NULL;
+    uint64_t data_off;
+    if (res->raw && zip_data_offset(in, &e, &data_off))
+    {
+        fseeko(in, 0, SEEK_END);
+        off_t zsize = ftello(in);
+        int n_in = sdraw_map(in, (uint32_t)zsize, in_ext, 64);
+        if (n_in > 0)
+            rd = sdr_open(in_ext, n_in, data_off, e.comp_size);
+        if (!rd)
+            log_printf("  raw SD reads unavailable (%d extents), using DLDI\n", n_in);
+    }
+    res->raw_read = rd != NULL;
+
+    sdwriter_t *w = res->raw ? sdw_open_raw(out, RING_SIZE, UNZIP_WRITE_CHUNK, ext, n_ext)
                              : sdw_open(out, RING_SIZE, WRITE_CHUNK);
     bool ok = false;
     if (!w)
@@ -378,7 +409,15 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
     else
     {
         zip_sink_t sink = { sink_reserve, sink_commit, w };
-        ok = zip_extract(in, &e, &sink, cb, ctx, &res->st);
+        if (rd)
+        {
+            zip_source_t src = { raw_src_get, raw_src_consume, rd };
+            ok = zip_extract_src(&src, &e, &sink, cb, ctx, &res->st);
+        }
+        else
+            ok = zip_extract(in, &e, &sink, cb, ctx, &res->st);
+        if (rd)
+            sdr_close(rd);
         bool wok = sdw_close(w);
         if (!ok)
         {
