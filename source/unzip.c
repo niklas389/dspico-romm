@@ -44,12 +44,13 @@ static void yield(void)
 #endif
 static uint8_t itcm_state[7680] STATE_MEM __attribute__((aligned(8)));
 static bool itcm_state_used;
+bool unzip_state_itcm = true;
 
 static voidpf z_alloc(voidpf opaque, uInt items, uInt size)
 {
     (void)opaque;
     size_t n = (size_t)items * size;
-    if (!itcm_state_used && n <= sizeof(itcm_state))
+    if (unzip_state_itcm && !itcm_state_used && n <= sizeof(itcm_state))
     {
         itcm_state_used = true;
         return itcm_state;
@@ -550,3 +551,47 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
         inflateEnd(&z);
     return ok;
 }
+
+// --- Speed test --------------------------------------------------------------
+
+#ifdef __NDS__
+void z_inflate_fast(z_streamp strm, unsigned start);
+void z_inflate_fast_ram(z_streamp strm, unsigned start);
+extern void (*romm_inflate_fast)(z_streamp strm, unsigned start);
+
+uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
+                           bool fast_in_itcm, bool state_in_itcm,
+                           uint32_t (*crcfn)(uint32_t, const void *, size_t),
+                           uint32_t *crc)
+{
+    romm_inflate_fast = fast_in_itcm ? z_inflate_fast : z_inflate_fast_ram;
+    unzip_state_itcm = state_in_itcm;
+
+    z_stream z;
+    memset(&z, 0, sizeof(z));
+    z.zalloc = z_alloc;
+    z.zfree = z_free;
+    uint64_t ticks = 0;
+    uint32_t c = 0;
+    int r = inflateInit2(&z, -MAX_WBITS);
+    if (r == Z_OK)
+    {
+        z.next_in = (Bytef *)in;
+        z.avail_in = (uInt)n;
+        while (r == Z_OK)
+        {
+            z.next_out = out;
+            z.avail_out = (uInt)step;
+            uint64_t t0 = prof_ticks();
+            r = inflate(&z, Z_NO_FLUSH);
+            ticks += prof_ticks() - t0;
+            c = crcfn(c, out, step - z.avail_out);
+        }
+        inflateEnd(&z);
+    }
+    romm_inflate_fast = z_inflate_fast;
+    unzip_state_itcm = true;
+    *crc = c;
+    return r == Z_STREAM_END ? (ticks ? ticks : 1) : 0;
+}
+#endif

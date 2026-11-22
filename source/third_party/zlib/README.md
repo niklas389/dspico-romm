@@ -8,4 +8,8 @@ Unmodified source from zlib 1.3.1 (taken from the `libz-sys` 1.1.20 crate,
 - File names: `inffast.itcm.arm.c` (the hot decoding loop runs from ITCM in
   ARM mode), `inflate.arm.c`, `inftrees.arm.c` (ARM mode).
 
+- `inflate.arm.c`: calls `inflate_fast()` through the pointer
+  `romm_inflate_fast`; `inffast_ram.arm.c` builds a second copy that stays
+  in main RAM, so the speed test can compare both placements.
+
 Used by `source/unzip.c` for zip archives.

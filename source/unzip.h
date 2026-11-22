@@ -81,6 +81,9 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
                      const zip_sink_t *sink, zip_progress_fn cb, void *ctx,
                      zip_stats_t *st);
 
+// Speed test knob: inflate state in ITCM (default) or main RAM.
+extern bool unzip_state_itcm;
+
 // True for file names the library stores as archives (.zip).
 bool zip_is_archive_name(const char *name);
 

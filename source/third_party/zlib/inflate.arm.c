@@ -85,6 +85,10 @@
 #include "inflate.h"
 #include "inffast.h"
 
+/* dspico-romm: inflate_fast is called through this pointer so the speed
+   test can compare the ITCM copy with one in main RAM (inffast_ram.arm.c). */
+void (*romm_inflate_fast)(z_streamp strm, unsigned start) = inflate_fast;
+
 #ifdef MAKEFIXED
 #  ifndef BUILDFIXED
 #    define BUILDFIXED
@@ -1026,7 +1030,7 @@ int ZEXPORT inflate(z_streamp strm, int flush) {
         case LEN:
             if (have >= 6 && left >= 258) {
                 RESTORE();
-                inflate_fast(strm, out);
+                romm_inflate_fast(strm, out); /* dspico-romm: selectable copy */
                 LOAD();
                 if (state->mode == TYPE)
                     state->back = -1;
