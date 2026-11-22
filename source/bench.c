@@ -8,6 +8,7 @@
 //   - optionally plain HTTP (http_url= in config.ini) to see the TLS cost
 
 #include "bench.h"
+#include "aesbench.h"
 
 #include <netdb.h>
 #include <stdio.h>
@@ -877,6 +878,8 @@ void bench_run_suite(const config_t *cfg, int rom_id, const char *fs_name,
     uint32_t rtt_min, rtt_med, chacha, gcm, sd;
     bench_rtt(cfg, &rtt_min, &rtt_med);
     bench_crypto(&chacha, &gcm);
+    ghash_bench();
+    aes_bench(); // DSi AES engine feasibility (TLS_AES_128_GCM)
     sd = bench_sd(cfg);
     bench_sdraw(cfg);
 
