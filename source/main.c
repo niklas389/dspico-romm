@@ -218,7 +218,14 @@ static void step_wifi(void)
               "Set up the AP in DSi System\n"
               "Settings (slot 4-6 for WPA2).");
 
+    // Wifi_InitDefault() can return before DHCP has finished: wait for the
+    // address (the ARM7 receive options below are only enabled afterwards).
     u32 ip = Wifi_GetIP();
+    for (int i = 0; i < 600 && (ip == 0 || ip == 0xFFFFFFFF); i++) // ~10 s
+    {
+        swiWaitForVBlank();
+        ip = Wifi_GetIP();
+    }
     unsigned char mac[6] = { 0 };
     Wifi_GetData(WIFIGETDATA_MACADDRESS, 6, mac);
 
@@ -296,6 +303,21 @@ static void step_heartbeat(void)
     log_printf("\n[1] GET /api/heartbeat (new conn)\n");
     bool ok = net_get("/api/heartbeat", false, &body, &res);
     net_log_result("heartbeat", &res);
+#ifdef DSPICO_DSWIFI
+    if ((!ok || res.status != 200) && (g_cfg.a7cmd53 || g_cfg.a7dma))
+    {
+        // Safety net for the ARM7 receive options: back to the proven path
+        extern void Wifi_A7SetOpts(u32 opts);
+        Wifi_A7SetOpts(0);
+        g_cfg.a7cmd53 = g_cfg.a7dma = false;
+        log_printf("ARM7 RX options turned OFF (first request failed), retrying\n");
+        buf_free(&body);
+        for (int i = 0; i < 60; i++)
+            swiWaitForVBlank();
+        ok = net_get("/api/heartbeat", false, &body, &res);
+        net_log_result("heartbeat (retry)", &res);
+    }
+#endif
     if (!ok || res.status != 200)
     {
         buf_free(&body);

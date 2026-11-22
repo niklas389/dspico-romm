@@ -106,9 +106,38 @@
  // dspico-romm: ARM7 breakdown counters (see arm7/twl/card.twl.c A7P_*).
  void Wifi_Arm7Prof(u32 out[8])
  {
+--- a/source/arm7/twl/sdio.h
++++ b/source/arm7/twl/sdio.h
+@@ -208,6 +208,7 @@
+ 
+ void wifi_sdio_stop(void);
+ void wifi_sdio_setclk(u32 data);
++void wifi_sdio_prepare_read32(void); // dspico-romm
+ 
+ void wifi_sdio_enable_cardirq(bool en);
+ u16 wifi_sdio_get_cardirq_stat(void);
+--- a/source/arm7/twl/sdio.twl.c
++++ b/source/arm7/twl/sdio.twl.c
+@@ -43,6 +43,16 @@
+     wifi_sdio_write32(reg, val);
+ }
+ 
++// dspico-romm: 32-bit FIFO read mode for a byte-mode (single) CMD53 read.
++// wifi_sdio_send_command() only configures it for block transfers, so a
++// single read after a block write found the FIFO in write mode: no RX-ready,
++// the bytes stayed in the FIFO and corrupted the next packet read.
++void wifi_sdio_prepare_read32(void)
++{
++    wifi_sdio_write16(WIFI_SDIO_OFFS_DATA16_CNT, 0x0002);
++    wifi_sdio_write16(WIFI_SDIO_OFFS_IRQ32, 0xC02);
++}
++
+ void wifi_sdio_controller_init(void)
+ {
+     wifi_sdio_mask16(WIFI_SDIO_OFFS_IRQ32, 0x0800, 0x0000);
 --- a/source/arm7/twl/card.twl.c
 +++ b/source/arm7/twl/card.twl.c
-@@ -330,6 +330,38 @@
+@@ -330,6 +330,42 @@
      return wifi_card_alignedbuf_small[0];
  }
  
@@ -119,6 +148,10 @@
 +// RX_LOOKAHEAD_VALID, ..., out[2] = RX_LOOKAHEAD0. Returns false on errors.
 +static bool wifi_card_read_irq_regs(u32 out[3])
 +{
++    wifi_ndma_wait();
++    wifi_sdio_stop();
++    wifi_sdio_prepare_read32();
++
 +    wlan_ctx.tmio.buffer = wifi_card_alignedbuf_small;
 +    wlan_ctx.tmio.size = 12;
 +    wlan_ctx.tmio.break_early = true;
@@ -147,7 +180,7 @@
  static void wifi_card_write_func1_u16(u32 addr, u16 val)
  {
      // Write from MSB to LSB
-@@ -750,8 +782,21 @@
+@@ -750,8 +786,21 @@
  
      if (readpkt_irq_mode)
      {
@@ -171,7 +204,7 @@
              return 0;
      }
      else
-@@ -812,6 +857,37 @@
+@@ -812,6 +861,37 @@
          return 0;
      }
  
@@ -209,7 +242,7 @@
      u16 actual_len = wifi_card_mbox0_readbytes(read_buffer, MBOX_TMPBUF_SIZE, full_len);
  
      if (!actual_len)
-@@ -848,6 +924,26 @@
+@@ -848,6 +928,26 @@
      {
          wmi_handle_pkt(pkt_cmd, pkt_data, len_pkt - 2, ack_len);
      }
@@ -236,7 +269,7 @@
      else if (pkt_type == 2 || pkt_type == 3 || pkt_type == 4 || pkt_type == 5) // one of my routers sends 0x04 for some reason
      {
          data_handle_pkt(pkt_data - 2, len_pkt);
-@@ -884,6 +980,8 @@
+@@ -884,6 +984,8 @@
              {
                  mbox_has_lookahead = true;
                  mbox_lookahead = getle32(&ack_data[ack_idx+1]);
@@ -245,7 +278,7 @@
  
                  //hexdump(&ack_data[ack_idx], 6);
              }
-@@ -1161,8 +1259,24 @@
+@@ -1161,8 +1263,24 @@
      // dspico-romm: read the four status bytes with one CMD53 and write back
      // only the non-zero ones (same values and order as upstream's 32-bit
      // write, which always cost four CMD52).
@@ -271,7 +304,7 @@
      for (int b = 3; b >= 0; b--)
      {
          u8 v = (int_sts >> (8 * b)) & 0xFF;
-@@ -1431,6 +1545,13 @@
+@@ -1431,6 +1549,13 @@
  
      // Begin talking to bootloader
      u32 bmi_ver = wifi_card_bmi_get_version();
