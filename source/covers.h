@@ -4,12 +4,13 @@
 
 // Game artwork from RomM, decoded once and cached on the SD card in display
 // format, one folder per platform: <base>/covers/<platform id>/
-//   <rom id>.tl  strip image: 2D box art (ScreenScraper "box2d", stored by RomM
+//   <rom id>.tl2 strip image: 2D box art (ScreenScraper "box2d", stored by RomM
 //                next to the cover), else the cover; whole picture, at most
-//                TILE_S x TILE_S (.tc: from the cover, config art=cover)
+//                TILE_S x TILE_S, nearly square art cropped to fill it (.tc2: from the
+//                cover, config art=cover)
 //   <rom id>.tp  top screen image: the cover (path_cover_small) filling
 //                COVER_W x COVER_H, else the box art fitted into it
-//   <rom id>.tln / .tpn  no usable artwork for that image
+//   <rom id>.tl2n / .tc2n / .tpn  no usable artwork for that image
 // File: "RCV3", width, height (one byte each, 2 bytes padding), RGB15 pixels.
 
 #include <stdbool.h>

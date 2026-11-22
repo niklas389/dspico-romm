@@ -22,6 +22,9 @@ typedef struct
     uint32_t rows_ms;        // PNG: unfiltering, conversion and scaling
 } imgdec_info_t;
 
+// Image size from the header only (PNG, JPEG)
+bool imgdec_size(const uint8_t *data, size_t len, int *w, int *h);
+
 // fill: crop to exactly maxw x maxh; else the whole picture fitted inside.
 bool imgdec_scaled(const uint8_t *data, size_t len, bool fill, int maxw, int maxh,
                    uint16_t *out, int *ow, int *oh, imgdec_info_t *info);

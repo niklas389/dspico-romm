@@ -94,6 +94,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.55 | – | – | Artwork speed: streaming PNG decoder (zlib, row-wise scaling, yields every ~4 ms), TJpgDec for JPEG at 1/2..1/8 scale, stb_image only as fallback; per-image fetch/decode timing in the log; art=box2d/cover setting; "Download all artwork" in the tools menu |
 | 0.56 | – | – | Measured (0.55, DSi): box2d 705x700 PNG 2.7 s decode + 0.8 s fetch, small cover 162x216 0.19 s + 0.1 s. Decoding now converts/scales only sampled rows and columns (max 3x3 per output pixel), zlib state in ITCM, log splits inflate/rows time; START asks before quitting; Wi-Fi bar thresholds from RSSI 202 at -54 dBm |
 | 0.57 | – | – | Dark mode (tools menu, saved in romm/ui.txt); X on the platform screen syncs all saves of the visible platforms (safe directions only, summary with conflicts) |
+| 0.58 | – | – | Strip art: nearly square images (aspect up to 5:4, e.g. DS boxes ~1.12:1) are cropped to fill the 64x64 tile; others stay whole. New strip cache names (.tl2/.tc2), so strip images load once more |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -139,8 +140,8 @@ Artwork comes from RomM (PNG or JPEG). The strip shows the 2D box art
 (ScreenScraper `box2d`, which RomM stores next to the cover when `box2d` is in
 `scan.media`, the default), else the cover. The top screen shows the cover
 (`path_cover_small`, filling 90x120), else the box art. The cache is one folder
-per platform, `romm/covers/<platform id>/` (`<rom id>.tl` strip image, `.tp` top
-image, `.tln`/`.tpn` = no artwork), read once when the platform opens. Missing
+per platform, `romm/covers/<platform id>/` (`<rom id>.tl2` strip image, `.tp` top
+image, `.tl2n`/`.tpn` = no artwork), read once when the platform opens. Missing
 images are downloaded in the background only while the selection rests for
 0.5 s: first the selected game's cover, then strip images nearest to it.
 Decoding: PNG with an own streaming decoder (zlib inflate row by row, each row

@@ -20,12 +20,12 @@ bool cover_tile_box2d = true;
 // changing art= in config.ini takes effect without deleting the cache
 static const char *ext_img_k(int kind)
 {
-    return kind == COV_TOP ? "tp" : cover_tile_box2d ? "tl" : "tc";
+    return kind == COV_TOP ? "tp" : cover_tile_box2d ? "tl2" : "tc2";
 }
 
 static const char *ext_none_k(int kind)
 {
-    return kind == COV_TOP ? "tpn" : cover_tile_box2d ? "tln" : "tcn";
+    return kind == COV_TOP ? "tpn" : cover_tile_box2d ? "tl2n" : "tc2n";
 }
 
 static void plat_dir(const config_t *cfg, int platform_id, char *out, int len)
@@ -170,6 +170,14 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
         // Top screen: the cover fills 90x120; box art and strip images are
         // shown whole
         bool fill = kind == COV_TOP && src[k] == e->cover;
+        // Strip: nearly square art (DS boxes are ~1.12:1) fills the whole
+        // tile, cropping a little at the sides; clearly portrait or landscape
+        // art is shown whole
+        int iw, ih;
+        if (kind == COV_TILE &&
+            imgdec_size((const uint8_t *)body.data, body.len, &iw, &ih) &&
+            iw * 4 <= ih * 5 && ih * 4 <= iw * 5)
+            fill = true;
         imgdec_info_t inf;
         ok = imgdec_scaled((const uint8_t *)body.data, body.len, fill,
                            kind == COV_TILE ? TILE_S : COVER_W,

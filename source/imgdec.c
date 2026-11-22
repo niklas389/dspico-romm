@@ -361,6 +361,12 @@ static bool stb_scaled(const uint8_t *d, size_t len, bool fill, int maxw, int ma
     return ok;
 }
 
+bool imgdec_size(const uint8_t *data, size_t len, int *w, int *h)
+{
+    int comp;
+    return stbi_info_from_memory(data, (int)len, w, h, &comp) && *w > 0 && *h > 0;
+}
+
 bool imgdec_scaled(const uint8_t *data, size_t len, bool fill, int maxw, int maxh,
                    uint16_t *out, int *ow, int *oh, imgdec_info_t *info)
 {
