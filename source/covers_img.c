@@ -54,3 +54,14 @@ void cover_fit(const uint8_t *rgb, int w, int h, uint16_t *out, int maxw, int ma
     *ow = dw;
     *oh = dh;
 }
+
+void cover_fill(const uint8_t *rgb, int w, int h, uint16_t *out, int dw, int dh)
+{
+    // Fills dw x dh, cropping the longer side around the centre
+    int sw = w, sh = h;
+    if ((long)w * dh > (long)h * dw)
+        sw = h * dw / dh;
+    else
+        sh = w * dh / dw;
+    scale_box(rgb, w, (w - sw) / 2, (h - sh) / 2, sw, sh, out, dw, dh);
+}

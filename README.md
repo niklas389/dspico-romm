@@ -90,6 +90,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.51 | – | – | Cover art: background download nearest the selection (only while it rests, paused for other network use), PNG/JPEG decode (stb_image), SD cache in display format; A opens the details page for every game |
 | 0.52 | – | – | Battery icon in the status bar (4 segments from the DSi level 0..15, green while charging, red when nearly empty; read every 10 s) |
 | 0.53 | – | – | Artwork: 2D box art first (fallback cover), whole picture with aspect ratio (cache format v2, re-downloaded once); top cover shown at once on selection; tiles near the selection loaded every frame; cover result kept when a key interrupts the download; details page fetches its cover if missing; faster scrolling (animation, key repeat) |
+| 0.54 | – | – | Strip: 2D box art; top screen: cover (as in 0.51). Cover cache per platform, read with one folder scan (no per-game file lookups); images load only when the strip stands still; downloads only after 0.5 s of rest |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -130,13 +131,16 @@ shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
 | Save sync | L keep the DSi save (upload), R keep the RomM save (download), B back |
 | Tools (SELECT) | Show log, speed test, unzip CPU test (text console) |
 
-Artwork comes from RomM: the 2D box art (ScreenScraper `box2d`, which RomM
-stores next to the cover when `box2d` is in `scan.media`, the default), else
-the cover (`path_cover_small`); PNG or JPEG. While the selection rests in a
-platform, a background thread downloads the missing ones nearest the selected
-game first, decodes them (stb_image) and stores them in display format in
-`romm/covers/<rom id>.cv2` (whole picture, up to 90x120 for the top screen and
-64x64 for the strip). `<rom id>.nn2` marks games without usable artwork. Games without a
+Artwork comes from RomM (PNG or JPEG). The strip shows the 2D box art
+(ScreenScraper `box2d`, which RomM stores next to the cover when `box2d` is in
+`scan.media`, the default), else the cover. The top screen shows the cover
+(`path_cover_small`, filling 90x120), else the box art. The cache is one folder
+per platform, `romm/covers/<platform id>/` (`<rom id>.tl` strip image, `.tp` top
+image, `.tln`/`.tpn` = no artwork), read once when the platform opens. Missing
+images are downloaded in the background only while the selection rests for
+0.5 s: first the selected game's cover, then strip images nearest to it.
+Older caches (`romm/covers/*.cov`, `*.cv2`, `*.none`, `*.nn2`) are no longer
+used and can be deleted. Games without a
 cover keep the placeholder (initials on a colour).
 
 ## Downloading ROMs
