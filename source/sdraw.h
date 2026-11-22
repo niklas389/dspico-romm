@@ -59,6 +59,14 @@ static inline bool sdraw_op_pending(const sdraw_op_t *op)
     return op->state == SDRAW_OP_QUEUED || op->state == SDRAW_OP_RUNNING;
 }
 bool sdraw_async_busy(void);     // Any operation queued or running
+typedef struct
+{
+    uint32_t irqs, polls;
+    uint64_t irq_ticks;          // BUS_CLOCK ticks spent in the IRQ handlers
+    uint32_t avg_read_ticks;     // Usual wait until a sector is ready
+    uint32_t avg_write_ticks;
+} sdraw_stats_t;
+void sdraw_async_stats_ex(sdraw_stats_t *st); // Cumulative
 void sdraw_async_stats(uint32_t *irqs, uint32_t *polls);
 
 #endif

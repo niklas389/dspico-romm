@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "net.h"
+#include "sdraw.h"
 #include "unzip.h"
 
 typedef struct
@@ -24,6 +25,7 @@ typedef struct
     int attempts;           // HTTP requests made (1 = no resume needed)
     uint64_t bytes;
     uint32_t ms;
+    sdraw_stats_t io;       // DSpico DMA engine activity during the download
     char path[CFG_PATH_MAX + 256];
     char error[160];
 } download_result_t;
@@ -57,6 +59,7 @@ typedef struct
     uint64_t in_bytes, out_bytes;
     uint32_t ms;
     zip_stats_t st;
+    sdraw_stats_t io;       // DSpico DMA engine activity while unpacking
     char entry[256];
     char path[CFG_PATH_MAX + 256];
     char error[160];
@@ -75,6 +78,9 @@ bool download_local(const config_t *cfg, const char *folder, const char *fs_name
 
 bool download_extract(const config_t *cfg, const char *folder, const char *zip_name,
                       zip_progress_fn cb, void *ctx, extract_result_t *res);
+
+// Engine statistics as a difference (after - before).
+void download_io_delta(const sdraw_stats_t *before, sdraw_stats_t *io);
 
 // Free space on the library's drive.
 bool download_free_space(const config_t *cfg, uint64_t *bytes);

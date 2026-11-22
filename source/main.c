@@ -40,6 +40,30 @@ static config_t g_cfg;
 
 // One log per build variant, e.g. poc-32x1460-rx128.log
 #define LOG_NAME "poc-" TCP_WND_LABEL ".log"
+#define LOG_KEEP 5 // This run's log and the 4 before it (.1.log = previous)
+
+// "x.log" -> "x.<n>.log"
+static void log_name_n(const char *path, int n, char *out, int len)
+{
+    int stem = (int)strlen(path) - 4;
+    if (n == 0)
+        snprintf(out, len, "%s", path);
+    else
+        snprintf(out, len, "%.*s.%d.log", stem, path, n);
+}
+
+static void rotate_logs(const char *path)
+{
+    char from[CFG_PATH_MAX + 24], to[CFG_PATH_MAX + 24];
+    log_name_n(path, LOG_KEEP - 1, to, sizeof(to));
+    remove(to);
+    for (int n = LOG_KEEP - 2; n >= 0; n--)
+    {
+        log_name_n(path, n, from, sizeof(from));
+        log_name_n(path, n + 1, to, sizeof(to));
+        rename(from, to);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Small UI helpers
@@ -462,6 +486,17 @@ static bool extract_progress(void *ctx, uint64_t done, uint64_t total)
     return true;
 }
 
+static void log_io(const sdraw_stats_t *io)
+{
+    if (!io->irqs)
+        return;
+    log_printf("  SD engine: IRQ %lu ms, %lu IRQs, %lu polls, ready after ~%lu us read / %lu us write\n",
+               (unsigned long)(io->irq_ticks * 1000 / BUS_CLOCK), (unsigned long)io->irqs,
+               (unsigned long)io->polls,
+               (unsigned long)((uint64_t)io->avg_read_ticks * 1000000 / BUS_CLOCK),
+               (unsigned long)((uint64_t)io->avg_write_ticks * 1000000 / BUS_CLOCK));
+}
+
 static void log_extract(const extract_result_t *x)
 {
     uint32_t kbps = x->ms ? (uint32_t)((x->st.out_bytes * 1000 / 1024) / x->ms) : 0;
@@ -475,6 +510,7 @@ static void log_extract(const extract_result_t *x)
     log_printf("  read %lu ms, inflate %lu ms, crc %lu ms, SD wait %lu ms\n",
                (unsigned long)(x->st.read_us / 1000), (unsigned long)(x->st.inflate_us / 1000),
                (unsigned long)(x->st.crc_us / 1000), (unsigned long)(x->st.sink_us / 1000));
+    log_io(&x->io);
     if (!x->ok && !x->cancelled)
         log_printf("  %s%s\n", x->error, x->zip_removed ? " (archive deleted)" : "");
 }
@@ -546,6 +582,7 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
                    ok ? "done" : (r.cancelled ? "cancelled" : "FAILED"),
                    (unsigned long long)r.bytes, (unsigned long)r.ms, (unsigned long)kbps,
                    r.raw ? "DSpico DMA" : "DLDI", r.attempts);
+        log_io(&r.io);
         if (!ok && !r.cancelled)
             log_printf("  %s\n", r.error);
         if (!ok)
@@ -939,8 +976,9 @@ int main(int argc, char **argv)
     bool have_cfg = config_load(&g_cfg);
     if (g_cfg.base_dir[0])
     {
-        char path[CFG_PATH_MAX + 16];
+        char path[CFG_PATH_MAX + 24];
         config_path(&g_cfg, LOG_NAME, path, sizeof(path));
+        rotate_logs(path);
         log_open(path);
     }
 

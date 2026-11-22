@@ -10,6 +10,7 @@
 #include <nds.h>
 #include <nds/arm9/dldi.h>
 
+#include "prof.h"
 #include "third_party/fatfs/ff.h"
 
 // libnds builds FatFs with renamed entry points.
@@ -244,7 +245,16 @@ static sdraw_op_t *q_tail;
 static volatile int as_state;
 static uint32_t as_i;
 static volatile uint32_t as_irqs, as_polls;
+static volatile uint64_t as_irq_ticks;
 static bool as_ready;
+
+// Adaptive polling: the time from "sector handed over" to "status ready" is
+// learned per direction (moving average, BUS_CLOCK ticks); the first status
+// read is scheduled at ~3/4 of it instead of polling right away and then
+// every 30 us (millions of polls per ROM otherwise).
+#define RETRY_TICKS (BUS_CLOCK / 50000)   // 20 us after a miss
+static uint32_t as_avg[2];                 // [0] read, [1] write
+static uint64_t as_wait_t0;
 
 static void op_start(void);
 
@@ -324,10 +334,30 @@ static void as_finish(bool ok)
 }
 
 static void as_timer_irq(void);
+static void as_step_poll(void);
+
+static void as_poll_in(uint32_t ticks)
+{
+    if (ticks > 0xFFFF)
+        ticks = 0xFFFF;
+    timerStart(SDRAW_TIMER, ClockDivider_1, (u16)(0x10000 - ticks), as_timer_irq);
+}
 
 static void as_retry_later(void)
 {
-    timerStart(SDRAW_TIMER, ClockDivider_1, TIMER_FREQ(33000), as_timer_irq);
+    as_poll_in(RETRY_TICKS);
+}
+
+// Start waiting for the card: first status read at ~3/4 of the usual time.
+static void as_wait_ready(void)
+{
+    as_wait_t0 = prof_ticks();
+    uint32_t avg = as_avg[q_head->write ? 1 : 0];
+    uint32_t first = avg - avg / 4;
+    if (first < RETRY_TICKS)
+        as_step_poll();
+    else
+        as_poll_in(first);
 }
 
 static void as_step_poll(void)
@@ -340,8 +370,16 @@ static void as_step_poll(void)
     }
     if (r == 0)
     {
-        as_retry_later(); // Still busy: try again in ~30 us
+        as_retry_later(); // Still busy: try again shortly
         return;
+    }
+    // Learn the steady-state wait only (not the first read after E3, which
+    // includes the seek, nor the final write, which is not overlapped)
+    if ((as_state == ST_RD_POLL && as_i > 0) || as_state == ST_POLL_PREV)
+    {
+        int dir = q_head->write ? 1 : 0;
+        uint32_t w = (uint32_t)(prof_ticks() - as_wait_t0);
+        as_avg[dir] = as_avg[dir] ? as_avg[dir] - as_avg[dir] / 8 + w / 8 : w;
     }
     switch (as_state)
     {
@@ -391,21 +429,22 @@ static void op_start(void)
         return;
     }
     as_state = ST_RD_POLL;
-    as_step_poll();
+    as_wait_ready();
 }
 
 static void as_timer_irq(void)
 {
+    uint64_t t0 = prof_ticks();
     timerStop(SDRAW_TIMER);
     as_irqs++;
     if (q_head && (as_state == ST_POLL_PREV || as_state == ST_POLL_LAST ||
                    as_state == ST_RD_POLL))
         as_step_poll();
+    as_irq_ticks += prof_ticks() - t0;
 }
 
-static void as_card_irq(void)
+static void as_card_irq_body(void)
 {
-    as_irqs++;
     if (!q_head)
         return;
     if (as_state == ST_RD_RECV)
@@ -413,7 +452,7 @@ static void as_card_irq(void)
         DMA_CR(SDRAW_DMA) = 0;
         as_i++;
         as_state = ST_RD_POLL;
-        as_step_poll();
+        as_wait_ready();
         return;
     }
     if (as_state != ST_SENDING)
@@ -428,12 +467,20 @@ static void as_card_irq(void)
         else
         {
             as_state = ST_POLL_LAST;
-            as_step_poll();
+            as_wait_ready();
         }
         return;
     }
     as_state = ST_POLL_PREV; // wait for sector as_i - 1
-    as_step_poll();
+    as_wait_ready();
+}
+
+static void as_card_irq(void)
+{
+    uint64_t t0 = prof_ticks();
+    as_irqs++;
+    as_card_irq_body();
+    as_irq_ticks += prof_ticks() - t0;
 }
 
 bool sdraw_op_submit(sdraw_op_t *op)
@@ -503,6 +550,15 @@ bool sdraw_async_init(void)
 bool sdraw_async_busy(void)
 {
     return q_head != NULL;
+}
+
+void sdraw_async_stats_ex(sdraw_stats_t *st)
+{
+    st->irqs = as_irqs;
+    st->polls = as_polls;
+    st->irq_ticks = as_irq_ticks;
+    st->avg_read_ticks = as_avg[0];
+    st->avg_write_ticks = as_avg[1];
 }
 
 void sdraw_async_stats(uint32_t *irqs, uint32_t *polls)

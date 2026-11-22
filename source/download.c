@@ -147,6 +147,8 @@ bool download_rom(const config_t *cfg, int rom_id, const char *fs_name, uint64_t
 {
     memset(res, 0, sizeof(*res));
     uint32_t t0 = net_now_ms();
+    sdraw_stats_t io0;
+    sdraw_async_stats_ex(&io0);
 
     if (size == 0 || size > 0xFFFFFFFFull)
     {
@@ -241,6 +243,7 @@ bool download_rom(const config_t *cfg, int rom_id, const char *fs_name, uint64_t
         remove(part);
 
     res->ms = net_now_ms() - t0;
+    download_io_delta(&io0, &res->io);
     return res->ok;
 }
 
@@ -334,6 +337,8 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
 {
     memset(res, 0, sizeof(*res));
     uint32_t t0 = net_now_ms();
+    sdraw_stats_t io0;
+    sdraw_async_stats_ex(&io0);
 
     char zip_path[CFG_PATH_MAX + 256];
     download_target(cfg, folder, zip_name, zip_path, sizeof(zip_path));
@@ -455,6 +460,7 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
     }
 
     res->ms = net_now_ms() - t0;
+    download_io_delta(&io0, &res->io);
     return res->ok;
 }
 
@@ -553,4 +559,15 @@ bool download_space_check(const config_t *cfg, int rom_id, const char *folder,
         return true; // Don't block; allocation fails cleanly if it is full
     }
     return sc->free >= sc->need;
+}
+
+void download_io_delta(const sdraw_stats_t *before, sdraw_stats_t *io)
+{
+    sdraw_stats_t now;
+    sdraw_async_stats_ex(&now);
+    io->irqs = now.irqs - before->irqs;
+    io->polls = now.polls - before->polls;
+    io->irq_ticks = now.irq_ticks - before->irq_ticks;
+    io->avg_read_ticks = now.avg_read_ticks;
+    io->avg_write_ticks = now.avg_write_ticks;
 }
