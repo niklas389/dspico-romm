@@ -88,6 +88,8 @@ typedef struct
     bool hidden;
     const char *note;        // e.g. last save sync result, may be NULL
     const char *clock;
+    const uint16_t *icon;    // Platform icon, NULL: placeholder tile
+    int icon_w, icon_h;
 } ui_platform_t;
 
 void ui_draw_platform_top(uint16_t *fb, const ui_platform_t *p);

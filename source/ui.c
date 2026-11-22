@@ -292,8 +292,13 @@ void ui_draw_platform_top(uint16_t *fb, const ui_platform_t *p)
     background(fb);
     ui_top_header(fb, "RomM", p->clock);
 
-    gfx_rrect(fb, 15, 31, 82, 82, 13, UI_LINE, 0, 0);
-    tile(fb, 16, 32, 80, 80, p->label, ui_name_color(p->name), NULL, 0, 0, 12);
+    if (p->icon)
+        tile(fb, 16, 32, 80, 80, p->label, 0, p->icon, p->icon_w, p->icon_h, 0);
+    else
+    {
+        gfx_rrect(fb, 15, 31, 82, 82, 13, UI_LINE, 0, 0);
+        tile(fb, 16, 32, 80, 80, p->label, ui_name_color(p->name), NULL, 0, 0, 12);
+    }
 
     int x = 108, w = GFX_W - x - 6, y = 30;
     y += gfx_text_wrap(fb, &font_title, x, y, w, 2, UI_TEXT, p->name) * font_title.height;

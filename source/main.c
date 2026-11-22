@@ -2397,6 +2397,9 @@ typedef struct
     char name[28];
     char folder[32];
     char label[8];
+    char slug[40], fs_slug[40];
+    uint16_t *icon;          // RomM platform icon (PICON_S^2), NULL: placeholder
+    int icon_w, icon_h;
 } plat_t;
 
 static void platform_label(const char *folder, char *out, int len)
@@ -2460,9 +2463,40 @@ static void step_platforms(void)
         snprintf(pl[i].folder, sizeof(pl[i].folder), "%s",
                  download_folder(json_str(p, "slug"), json_str(p, "fs_slug")));
         platform_label(pl[i].folder, pl[i].label, sizeof(pl[i].label));
+        snprintf(pl[i].slug, sizeof(pl[i].slug), "%s", json_str(p, "slug") ? json_str(p, "slug") : "");
+        snprintf(pl[i].fs_slug, sizeof(pl[i].fs_slug), "%s",
+                 json_str(p, "fs_slug") ? json_str(p, "fs_slug") : "");
         pl[i].on_sd = -1;
     }
     cJSON_Delete(root);
+
+    // Platform icons: from the SD cache, missing ones from RomM (first start only)
+    int fetched = 0;
+    for (int i = 0; i < count; i++)
+    {
+        int st = platform_icon_state(&g_cfg, pl[i].id);
+        if (st == COV_MISSING)
+        {
+            char d[32];
+            snprintf(d, sizeof(d), "icons %d/%d", i + 1, count);
+            step_mark(ST_LIBRARY, 1, d);
+            st = platform_icon_fetch(&g_cfg, pl[i].id, pl[i].slug, pl[i].fs_slug);
+            fetched++;
+        }
+        if (st == COV_CACHED)
+        {
+            pl[i].icon = malloc(PICON_S * PICON_S * 2);
+            if (pl[i].icon &&
+                !platform_icon_load(&g_cfg, pl[i].id, pl[i].icon, &pl[i].icon_w, &pl[i].icon_h))
+            {
+                free(pl[i].icon);
+                pl[i].icon = NULL;
+            }
+        }
+    }
+    if (fetched)
+        log_printf("[Icons] %d platform icons fetched\n", fetched);
+
     char d[24];
     snprintf(d, sizeof(d), "%d platforms", count);
     step_mark(ST_LIBRARY, 2, d);
@@ -2505,8 +2539,9 @@ static void step_platforms(void)
                 hid |= hidden[j] == pl[i].id;
             if (hid && !edit)
                 continue;
-            tiles[n] = (ui_tile_t){ pl[i].name, pl[i].label, ui_name_color(pl[i].name), NULL,
-                                    0, 0, (uint8_t)(hid ? UI_TILE_DIMMED : 0) };
+            tiles[n] = (ui_tile_t){ pl[i].name, pl[i].label, ui_name_color(pl[i].name),
+                                    pl[i].icon, pl[i].icon_w, pl[i].icon_h,
+                                    (uint8_t)(hid ? UI_TILE_DIMMED : 0) };
             map[n++] = i;
         }
         if (sel >= n)
@@ -2521,7 +2556,8 @@ static void step_platforms(void)
             if (p->on_sd < 0)
                 p->on_sd = count_files(p->folder);
             ui_platform_t t = { p->name, p->label, p->folder, p->roms, p->on_sd, hid_sel,
-                                g_sync_note[0] ? g_sync_note : NULL, clock_str() };
+                                g_sync_note[0] ? g_sync_note : NULL, clock_str(), p->icon,
+                                p->icon_w, p->icon_h };
             ui_wifi_level = wifi_level();
             ui_draw_platform_top(gfx_top, &t);
             g_top_header = true;
@@ -2642,6 +2678,8 @@ static void step_platforms(void)
 
     free(tiles);
     free(map);
+    for (int i = 0; i < count; i++)
+        free(pl[i].icon);
     free(pl);
 }
 

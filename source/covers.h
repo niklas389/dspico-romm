@@ -42,6 +42,15 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
 bool cover_load(const config_t *cfg, int platform_id, int rom_id, int kind, uint16_t *out,
                 int *w, int *h);
 
+// Platform icons from RomM's web frontend (/assets/platforms/<slug>.ico),
+// cached as <base>/covers/platforms/<platform id>.pi (whole picture, at most
+// PICON_S x PICON_S, transparent pixels with bit 15 clear)
+#define PICON_S 80
+int platform_icon_state(const config_t *cfg, int platform_id);
+int platform_icon_fetch(const config_t *cfg, int platform_id, const char *slug,
+                        const char *fs_slug);
+bool platform_icon_load(const config_t *cfg, int platform_id, uint16_t *out, int *w, int *h);
+
 // Background colour for transparent artwork (light/dark theme)
 void cover_set_bg(bool dark);
 

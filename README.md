@@ -97,6 +97,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.58 | – | – | Strip art: nearly square images (aspect up to 5:4, e.g. DS boxes ~1.12:1) are cropped to fill the 64x64 tile; others stay whole. New strip cache names (.tl2/.tc2), so strip images load once more |
 | 0.59 | – | – | Own 32x32 app icon (icon.gif with transparency index 0; a BMP lost the transparency in ndstool); help texts that are too wide drop the double spaces; battery segments with padding on both sides; screens stay black until the theme is loaded (no white flash in dark mode) |
 | 0.60 | – | – | Strip stutter: the save status (MD5 of the save file) is computed by the background thread in yielding 16 KB pieces instead of on the UI thread; artwork is no longer marked "none" after a network error (only 404 / not decodable); "Download all artwork" also retries games marked "none" |
+| 0.61 | – | – | Platform icons from RomM (/assets/platforms/<slug>.ico, PNG inside, fetched once at start, cached); artwork transparency kept in the cache (works in both themes) |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -153,6 +154,10 @@ every ~4 ms. Each image logs its size, fetch and decode time (`[Cover]`).
 `art=cover` in config.ini uses the small cover in the strip instead of the box
 art (much smaller files). Tools (SELECT) > "Download all artwork" loads every
 missing image of the platform in one go.
+Platform icons come from RomM's web frontend (`/assets/platforms/<slug>.ico`,
+the PNG inside; SVG-only icons can't be decoded and keep the placeholder),
+fetched once at start and cached in `romm/covers/platforms/`. Transparent parts
+of artwork stay transparent in the cache, so it fits both themes.
 Older caches (`romm/covers/*.cov`, `*.cv2`, `*.none`, `*.nn2`) are no longer
 used and can be deleted. Games without a
 cover keep the placeholder (initials on a colour).

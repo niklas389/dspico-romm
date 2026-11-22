@@ -263,3 +263,142 @@ bool cover_load(const config_t *cfg, int platform_id, int rom_id, int kind, uint
     fclose(f);
     return ok;
 }
+
+// --- Platform icons ------------------------------------------------------------
+//
+// RomM's web frontend ships an icon per platform as /assets/platforms/<slug>
+// .ico (also .svg, which the DSi can't decode). The .ico files hold a PNG
+// (256x256 in the ones checked). Cached as <base>/covers/platforms/<id>.pi,
+// <id>.pin = no usable icon.
+
+static void picon_path(const config_t *cfg, int platform_id, const char *ext, char *out,
+                       int len)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "covers/platforms/%d.%s", platform_id, ext);
+    config_path(cfg, name, out, len);
+}
+
+int platform_icon_state(const config_t *cfg, int platform_id)
+{
+    char p[CFG_PATH_MAX + 64];
+    struct stat st;
+    picon_path(cfg, platform_id, "pi", p, sizeof(p));
+    if (stat(p, &st) == 0)
+        return COV_CACHED;
+    picon_path(cfg, platform_id, "pin", p, sizeof(p));
+    if (stat(p, &st) == 0)
+        return COV_NONE;
+    return COV_MISSING;
+}
+
+// The largest PNG image inside an .ico file (or the data itself if it is a PNG)
+static bool ico_png(const uint8_t *d, size_t len, const uint8_t **png, size_t *plen)
+{
+    if (len > 8 && d[0] == 0x89 && d[1] == 'P')
+    {
+        *png = d;
+        *plen = len;
+        return true;
+    }
+    if (len < 6 || d[0] || d[1] || d[2] != 1 || d[3])
+        return false;
+    int n = d[4] | d[5] << 8, best = -1;
+    for (int i = 0; i < n && 6 + 16 * (size_t)(i + 1) <= len; i++)
+    {
+        const uint8_t *e = d + 6 + 16 * i;
+        int w = e[0] ? e[0] : 256;
+        uint32_t sz = e[8] | e[9] << 8 | e[10] << 16 | (uint32_t)e[11] << 24;
+        uint32_t off = e[12] | e[13] << 8 | e[14] << 16 | (uint32_t)e[15] << 24;
+        if (off >= len || sz > len - off || sz < 8 || d[off] != 0x89 || d[off + 1] != 'P')
+            continue; // Only PNG entries (BMP entries are not decoded)
+        if (best < 0 || w > best)
+        {
+            best = w;
+            *png = d + off;
+            *plen = sz;
+        }
+    }
+    return best >= 0;
+}
+
+int platform_icon_fetch(const config_t *cfg, int platform_id, const char *slug,
+                        const char *fs_slug)
+{
+    const char *names[2] = { slug, fs_slug };
+    static uint16_t px[PICON_S * PICON_S];
+    int ow = 0, oh = 0;
+    bool ok = false, net_error = false;
+    for (int k = 0; k < 2 && !ok; k++)
+    {
+        if (!names[k] || !names[k][0] || (k == 1 && slug && !strcmp(slug, fs_slug)))
+            continue;
+        char path[128];
+        snprintf(path, sizeof(path), "/assets/platforms/%s.ico", names[k]);
+        buf_t body = { 0 };
+        long status;
+        if (!fetch(path, &body, &status))
+        {
+            if (status != 404)
+                net_error = true;
+            continue;
+        }
+        const uint8_t *png;
+        size_t plen;
+        imgdec_info_t inf = { 0 };
+        if (ico_png((const uint8_t *)body.data, body.len, &png, &plen))
+            ok = imgdec_scaled(png, plen, false, PICON_S, PICON_S, px, &ow, &oh, &inf);
+        log_printf("[Icon] %s: %u B, %dx%d%s\n", names[k], (unsigned)body.len, inf.w, inf.h,
+                   ok ? "" : " (no PNG inside)");
+        buf_free(&body);
+    }
+
+    char dir[CFG_PATH_MAX + 32], p[CFG_PATH_MAX + 64];
+    config_path(cfg, "covers", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    config_path(cfg, "covers/platforms", dir, sizeof(dir));
+    mkdir(dir, 0777);
+    if (!ok)
+    {
+        if (net_error)
+            return COV_MISSING;
+        picon_path(cfg, platform_id, "pin", p, sizeof(p));
+        FILE *f = fopen(p, "wb");
+        if (f)
+            fclose(f);
+        return COV_NONE;
+    }
+    picon_path(cfg, platform_id, "pi", p, sizeof(p));
+    FILE *f = fopen(p, "wb");
+    if (!f)
+        return COV_MISSING;
+    unsigned char hdr[8] = { 'R', 'C', 'V', '3', (unsigned char)ow, (unsigned char)oh, 0, 0 };
+    bool wr = fwrite(hdr, 1, 8, f) == 8 && fwrite(px, 2, ow * oh, f) == (size_t)(ow * oh);
+    wr &= fclose(f) == 0;
+    if (!wr)
+    {
+        remove(p);
+        return COV_MISSING;
+    }
+    return COV_CACHED;
+}
+
+bool platform_icon_load(const config_t *cfg, int platform_id, uint16_t *out, int *w, int *h)
+{
+    char p[CFG_PATH_MAX + 64];
+    picon_path(cfg, platform_id, "pi", p, sizeof(p));
+    FILE *f = fopen(p, "rb");
+    if (!f)
+        return false;
+    unsigned char hdr[8];
+    bool ok = fread(hdr, 1, 8, f) == 8 && memcmp(hdr, "RCV3", 4) == 0 && hdr[4] && hdr[5] &&
+              hdr[4] <= PICON_S && hdr[5] <= PICON_S;
+    if (ok)
+    {
+        *w = hdr[4];
+        *h = hdr[5];
+        ok = fread(out, 2, (size_t)(*w * *h), f) == (size_t)(*w * *h);
+    }
+    fclose(f);
+    return ok;
+}

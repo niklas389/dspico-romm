@@ -5,14 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Background for transparent pixels (the theme's UI_BG)
-static uint32_t BG_R = 236, BG_G = 238, BG_B = 241;
-
+// Transparent pixels stay transparent in the cache (RGB15 bit 15 clear), so
+// artwork works with both themes. Kept for the API.
 void cover_set_bg(bool dark)
 {
-    BG_R = dark ? 26 : 236;
-    BG_G = dark ? 28 : 238;
-    BG_B = dark ? 33 : 241;
+    (void)dark;
 }
 
 void rs_geometry(int w, int h, bool fill, int maxw, int maxh, int *cx, int *cy, int *cw,
@@ -55,7 +52,7 @@ bool rs_init(rowscale_t *rs, int w, int h, bool fill, int maxw, int maxh, uint16
     rs->h = h;
     rs->out = out;
     rs_geometry(w, h, fill, maxw, maxh, &rs->cx, &rs->cy, &rs->cw, &rs->ch, &rs->dw, &rs->dh);
-    rs->acc = calloc(rs->dw * 4, sizeof(uint32_t));
+    rs->acc = calloc(rs->dw * 5, sizeof(uint32_t));
     rs->xmap = malloc(rs->cw * sizeof(uint16_t));
     rs->xuse = calloc(rs->cw, 1);
     rs->yuse = calloc(rs->ch, 1);
@@ -97,12 +94,17 @@ static void flush(rowscale_t *rs)
     uint16_t *o = rs->out + rs->oy * rs->dw;
     for (int x = 0; x < rs->dw; x++)
     {
-        uint32_t *a = &rs->acc[x * 4];
+        uint32_t *a = &rs->acc[x * 5];
+        if (a[4] > a[3])
+        {
+            o[x] = 0; // Mostly transparent: bit 15 clear, gfx_blit skips it
+            continue;
+        }
         uint32_t n = a[3] ? a[3] : 1;
         uint32_t r = a[0] / n, g = a[1] / n, b = a[2] / n;
         o[x] = (uint16_t)(0x8000 | (b >> 3) << 10 | (g >> 3) << 5 | (r >> 3));
     }
-    memset(rs->acc, 0, rs->dw * 4 * sizeof(uint32_t));
+    memset(rs->acc, 0, rs->dw * 5 * sizeof(uint32_t));
 }
 
 void rs_row(rowscale_t *rs, int y, const uint8_t *px, int bpp)
@@ -120,19 +122,15 @@ void rs_row(rowscale_t *rs, int y, const uint8_t *px, int bpp)
     {
         if (!rs->xuse[x])
             continue;
-        uint32_t *a = &rs->acc[rs->xmap[x] * 4];
-        uint32_t r = p[0], g = p[1], b = p[2];
-        if (bpp == 4 && p[3] != 255)
+        uint32_t *a = &rs->acc[rs->xmap[x] * 5];
+        if (bpp == 4 && p[3] < 128)
         {
-            // Transparent parts over the UI background
-            uint32_t al = p[3];
-            r = (r * al + BG_R * (255 - al)) / 255;
-            g = (g * al + BG_G * (255 - al)) / 255;
-            b = (b * al + BG_B * (255 - al)) / 255;
+            a[4]++; // Transparent sample (kept transparent, theme-independent)
+            continue;
         }
-        a[0] += r;
-        a[1] += g;
-        a[2] += b;
+        a[0] += p[0];
+        a[1] += p[1];
+        a[2] += p[2];
         a[3]++;
     }
 }

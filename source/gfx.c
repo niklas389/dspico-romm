@@ -273,7 +273,9 @@ void gfx_blit(uint16_t *fb, int x, int y, int dw, int dh, const uint16_t *img, i
             if ((unsigned)xx >= GFX_W)
                 continue;
             int a = radius ? box_cov(i, j, dw, dh, radius) : 256;
-            put(fb, xx, yy, row[i * w / dw], a);
+            uint16_t c = row[i * w / dw];
+            if (c & 0x8000) // Bit 15 clear: transparent
+                put(fb, xx, yy, c, a);
         }
     }
 }
