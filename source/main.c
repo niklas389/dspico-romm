@@ -268,9 +268,15 @@ static void wifi_diag_log(void)
                (unsigned long)d[3], (unsigned long)d[4], (unsigned long)d[18],
                (unsigned long)a7[1], (unsigned long)d[5], (unsigned long)d[6],
                (unsigned long)d[7]);
-    log_printf("  watchdog: %lu card re-inits, %lu IRQs found by polling,"
-               " WMI ready after %lu ticks (~ms)\n",
-               (unsigned long)d[16], (unsigned long)d[17], (unsigned long)d[19]);
+    log_printf("  watchdog: %lu card re-inits (%lu with SDIO reset), %lu IRQs found"
+               " by polling (last status %08lX), WMI ready after %lu ticks (~ms)\n",
+               (unsigned long)(d[16] & 0xFF), (unsigned long)(d[16] >> 8),
+               (unsigned long)d[17], (unsigned long)d[20], (unsigned long)d[19]);
+    log_printf("  init packets: %lu HTC, %lu WMI, %lu other, %lu bad;"
+               " first header %08lX, last %08lX\n",
+               (unsigned long)(d[21] & 0xFF), (unsigned long)((d[21] >> 8) & 0xFF),
+               (unsigned long)((d[21] >> 16) & 0xFF), (unsigned long)(d[21] >> 24),
+               (unsigned long)d[23], (unsigned long)d[22]);
     log_printf("  scan: %lu started, %lu done, %lu BSS (%lu low SNR), SNR max %lu"
                " last %lu, mode %lu\n",
                (unsigned long)d[8], (unsigned long)d[9], (unsigned long)d[10],
@@ -344,7 +350,8 @@ static void step_wifi(void)
 #ifdef DSPICO_DSWIFI
     // Before the first AutoConnect: the ARM7 initializes the card then
     Wifi_A7SetOpts(a7_opts_base());
-    log_printf("Wi-Fi: module reset %s\n", g_cfg.wifireset ? "on" : "off");
+    log_printf("Wi-Fi: module reset %s, a7cmd53 %d, a7dma %d\n",
+               g_cfg.wifireset ? "on" : "off", g_cfg.a7cmd53 ? 1 : 0, g_cfg.a7dma ? 1 : 0);
 #endif
     log_sync();
     Wifi_AutoConnect();

@@ -1,0 +1,103 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 167e1e1..433f7f6 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -780,6 +780,8 @@ static u16 wifi_card_mbox0_readbytes(u8 *read_buffer, u32 sz_buf, u32 len_read)
+     return actual_len;
+ }
+ 
++static void dspico_init_pkt(u32 header, int kind);
++
+ u16 wifi_card_mbox0_readpkt(void)
+ {
+     //memset(mbox_buffer, 0, MBOX_TMPBUF_SIZE);
+@@ -843,6 +845,9 @@ u16 wifi_card_mbox0_readpkt(void)
+     u16 len = header >> 16;
+     u16 full_len = round_up(len + 6, 0x80);
+ 
++    dspico_init_pkt(header, len > 0x2000 ? 3 : pkt_type == MBOXPKT_HTC ? 0
++                                       : pkt_type == MBOXPKT_WMI ? 1 : 2);
++
+     // On the off chance that a packet gets parsed incorrectly (full_len off-by-one, etc)
+     // just discard in chunks of 4 and be loud about it.
+     if (len > 0x2000)
+@@ -1264,7 +1269,10 @@ void dspico_card_poll(void)
+     if (!int_sts)
+         return;
+     if (WifiData)
++    {
+         WifiData->a7_diag[DSPICO_A7D_POLL_HITS]++;
++        WifiData->a7_diag[DSPICO_A7D_POLL_STS] = int_sts;
++    }
+     wifi_card_write_func1_u32(F1_HOST_INT_STATUS, int_sts);
+     while (wifi_card_mbox0_readpkt());
+ }
+@@ -1274,6 +1282,32 @@ bool dspico_card_started(void)
+     return wifi_card_bInitted;
+ }
+ 
++// dspico-romm: SDIO-level reset (CCCR I/O Abort, RES bit). The card drops
++// back to its idle state, so the next init runs the full CMD5/CMD3/CMD7
++// sequence instead of skipping it, and the mailbox side is reset too.
++void dspico_card_sdio_reset(void)
++{
++    wifi_card_write_func0_u8(0x6, 0x8);
++    ioDelay(0xF000);
++    if (WifiData)
++        WifiData->a7_diag[DSPICO_A7D_INIT_RESTARTS] += 0x100; // SDIO resets
++}
++
++// dspico-romm: counts packets while the card initializes (diagnostics)
++static void dspico_init_pkt(u32 header, int kind)
++{
++    if (!WifiData || WifiData->curMode != WIFIMODE_INITIALIZING)
++        return;
++    volatile u32 *d = WifiData->a7_diag;
++    if (d[DSPICO_A7D_INIT_PKTS] == 0 && d[DSPICO_A7D_FIRST_HDR] == 0)
++        d[DSPICO_A7D_FIRST_HDR] = header;
++    d[DSPICO_A7D_LAST_HDR] = header;
++    u32 v = d[DSPICO_A7D_INIT_PKTS];
++    u32 c = (v >> (8 * kind)) & 0xFF;
++    if (c < 0xFF)
++        d[DSPICO_A7D_INIT_PKTS] = v + (1u << (8 * kind));
++}
++
+ static void wifi_card_process_pkts(void)
+ {
+     if (!wifi_card_fast_path())
+diff --git a/source/arm7/twl/update.twl.c b/source/arm7/twl/update.twl.c
+index 9b77e8b..049299b 100644
+--- a/source/arm7/twl/update.twl.c
++++ b/source/arm7/twl/update.twl.c
+@@ -23,6 +23,7 @@ static void Wifi_TWL_Update_(void);
+ // dspico-romm: init watchdog (see dspico_card_poll in card.twl.c)
+ void dspico_card_poll(void);
+ bool dspico_card_started(void);
++void dspico_card_sdio_reset(void);
+ static u32 init_ticks;    // Update ticks (1 ms) in WIFIMODE_INITIALIZING
+ static u32 init_restarts; // Re-inits for the current enable request
+ #define INIT_POLL_TICKS    100  // Poll for card interrupts after 100 ms
+@@ -93,6 +94,8 @@ static void Wifi_TWL_Update_(void)
+                 init_ticks = 0;
+                 WifiData->a7_diag[DSPICO_A7D_INIT_RESTARTS]++;
+                 Wifi_TWL_Stop();
++                if (init_restarts >= 2) // 1st re-init as before, then also SDIO reset
++                    dspico_card_sdio_reset();
+                 Wifi_TWL_Start();
+             }
+             break;
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index 902cec3..1adac74 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -342,6 +342,10 @@ enum {
+     DSPICO_A7D_POLL_HITS,    // Init: pending interrupts found by polling
+     DSPICO_A7D_FW_TIMEOUT,   // Firmware "ready" flag never set (timeouts)
+     DSPICO_A7D_INIT_MS,      // Time from card init to WMI ready (last), ms
++    DSPICO_A7D_POLL_STS,     // Init: last HOST/CPU/ERROR/COUNTER_INT_STATUS
++    DSPICO_A7D_INIT_PKTS,    // Init packets: HTC | WMI << 8 | other << 16 | bad << 24
++    DSPICO_A7D_LAST_HDR,     // Init: last mailbox lookahead (packet header)
++    DSPICO_A7D_FIRST_HDR,    // Init: first mailbox lookahead after a card init
+ };
+ 
+ // dspico-romm: DSi RX ring entry whose data was written by SDIO DMA. The

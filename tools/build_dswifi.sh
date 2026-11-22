@@ -62,6 +62,7 @@ git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-aes-test.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-hwreset.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-wifidiag.patch"
 git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-initwatch.patch"
+git -C "$SRC" apply "$ROOT/patches/dswifi-arm7-initdiag2.patch"
 sed -i "s/#define DSPICO_TCP_WND_MSS 32/#define DSPICO_TCP_WND_MSS $WND_MSS/" \
     "$SRC/source/arm9/lwip/include/lwipopts.h"
 sed -i "s/#define DSPICO_RXBUF_KB 12/#define DSPICO_RXBUF_KB $RXBUF_KB/" \
