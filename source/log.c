@@ -7,6 +7,12 @@
 
 static FILE *log_fp;
 static unsigned log_lines;
+static bool log_echo = true;
+
+void log_set_echo(bool on)
+{
+    log_echo = on;
+}
 
 // fflush() only reaches FatFs; the file size in the directory is written by
 // fsync()/fclose(). After a crash the log was 0 bytes: sync every 8 lines.
@@ -43,9 +49,12 @@ void log_printf(const char *fmt, ...)
 {
     va_list ap;
 
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
+    if (log_echo)
+    {
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        va_end(ap);
+    }
 
     if (log_fp)
     {

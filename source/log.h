@@ -11,7 +11,11 @@ void log_close(void);
 // Writes the log to the SD card now (file size included).
 void log_sync(void);
 
-// Prints to the bottom-screen console and appends to the log file.
+// Echo of log_printf() to the text console (off while the graphical UI
+// owns the bottom screen).
+void log_set_echo(bool on);
+
+// Prints to the bottom-screen console (if echo is on) and appends to the log file.
 void log_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 // Appends to the log file only (verbose output such as curl debug traces).

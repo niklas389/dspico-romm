@@ -3,26 +3,13 @@
 
 #include <stdint.h>
 
-#include <nds.h>
+#include "gfx.h"
 
 #include "qrcodegen.h"
 
 #define SCREEN_W 256
 #define SCREEN_H 192
 #define QR_MAX_VERSION 10
-
-void top_init(void)
-{
-    videoSetMode(MODE_FB0);
-    vramSetBankA(VRAM_A_LCD);
-    top_clear();
-}
-
-void top_clear(void)
-{
-    for (int i = 0; i < SCREEN_W * SCREEN_H; i++)
-        VRAM_A[i] = RGB15(4, 4, 6) | BIT(15);
-}
 
 bool top_show_qr(const char *text)
 {
@@ -44,10 +31,9 @@ bool top_show_qr(const char *text)
     int x0 = (SCREEN_W - px) / 2;
     int y0 = (SCREEN_H - px) / 2;
 
-    top_clear();
-
-    const uint16_t white = RGB15(31, 31, 31) | BIT(15);
-    const uint16_t black = RGB15(0, 0, 0) | BIT(15);
+    const uint16_t white = GFX_RGB(255, 255, 255);
+    const uint16_t black = GFX_RGB(0, 0, 0);
+    gfx_clear(gfx_top, white);
 
     for (int y = 0; y < px; y++)
     {
@@ -57,7 +43,7 @@ bool top_show_qr(const char *text)
             int mx = x / scale - quiet;
             bool dark = mx >= 0 && my >= 0 && mx < size && my < size &&
                         qrcodegen_getModule(qr, mx, my);
-            VRAM_A[(y0 + y) * SCREEN_W + (x0 + x)] = dark ? black : white;
+            gfx_top[(y0 + y) * SCREEN_W + (x0 + x)] = dark ? black : white;
         }
     }
     return true;

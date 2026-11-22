@@ -4,11 +4,7 @@
 
 #include <stdbool.h>
 
-// The top screen is a 256x192 16-bit framebuffer (VRAM A in LCD mode).
-void top_init(void);
-void top_clear(void);
-
-// Renders text as a QR code centred on the top screen.
+// Draws text as a QR code centred on the top screen back buffer (gfx_top).
 bool top_show_qr(const char *text);
 
 #endif
