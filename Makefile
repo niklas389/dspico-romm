@@ -19,7 +19,7 @@ NAME		?= romm-poc
 GAME_TITLE	:= RomM PoC
 GAME_SUBTITLE	:= DSPico RomM client
 GAME_AUTHOR	:= dspico-romm
-GAME_ICON	:= icon.bmp
+GAME_ICON	:= icon.gif
 
 # Alternative DSWiFi build (see tools/build_dswifi.sh). Defaults to the SDK's.
 DSWIFI_DIR	?= $(BLOCKSDS)/libs/dswifi
