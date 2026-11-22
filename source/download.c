@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "dl.h"
@@ -84,6 +85,16 @@ static void make_dirs(const config_t *cfg, const char *folder)
     mkdir(dir, 0777);
 }
 
+static bool content_path(int rom_id, const char *fs_name, char *out, int out_len)
+{
+    char *escaped = net_escape(fs_name);
+    if (!escaped)
+        return false;
+    snprintf(out, out_len, "/api/roms/%d/content/%s", rom_id, escaped);
+    free(escaped);
+    return true;
+}
+
 // Reserve the whole file without writing data (DLDI path).
 static bool preallocate(FILE *f, uint64_t size)
 {
@@ -142,15 +153,12 @@ bool download_rom(const config_t *cfg, int rom_id, const char *fs_name, uint64_t
         return false;
     }
 
-    char *escaped = net_escape(fs_name);
-    if (!escaped)
+    char url_path[768];
+    if (!content_path(rom_id, fs_name, url_path, sizeof(url_path)))
     {
         snprintf(res->error, sizeof(res->error), "out of memory");
         return false;
     }
-    char url_path[768];
-    snprintf(url_path, sizeof(url_path), "/api/roms/%d/content/%s", rom_id, escaped);
-    free(escaped);
 
     make_dirs(cfg, folder);
     download_target(cfg, folder, fs_name, res->path, sizeof(res->path));
@@ -409,4 +417,101 @@ bool download_extract(const config_t *cfg, const char *folder, const char *zip_n
 
     res->ms = net_now_ms() - t0;
     return res->ok;
+}
+
+// --- Free space -------------------------------------------------------------
+
+bool download_free_space(const config_t *cfg, uint64_t *bytes)
+{
+    char drive[16];
+    drive_of(cfg, drive, sizeof(drive));
+    struct statvfs sv;
+    if (statvfs(drive, &sv) != 0)
+        return false;
+    *bytes = (uint64_t)sv.f_bavail * sv.f_frsize;
+    return true;
+}
+
+// Reads parts of a remote archive with Range requests; the last response is
+// cached (the central directory usually sits inside the first, tail read).
+typedef struct
+{
+    const char *path;
+    buf_t buf;
+    uint64_t buf_off;
+    int requests;
+} remote_zip_t;
+
+static bool remote_read(void *ctx, uint64_t off, void *dst, size_t n)
+{
+    remote_zip_t *rz = ctx;
+    if (!rz->buf.data || off < rz->buf_off || off + n > rz->buf_off + rz->buf.len)
+    {
+        buf_free(&rz->buf);
+        net_result_t r;
+        rz->requests++;
+        if (!net_get_range(rz->path, off, off + n - 1, &rz->buf, &r) || r.status != 206 ||
+            rz->buf.len != n)
+        {
+            log_printf("  zip directory: HTTP %ld, %u of %u B: %s\n", r.status,
+                       (unsigned)rz->buf.len, (unsigned)n, r.error);
+            buf_free(&rz->buf);
+            return false;
+        }
+        rz->buf_off = off;
+    }
+    memcpy(dst, rz->buf.data + (off - rz->buf_off), n);
+    return true;
+}
+
+bool download_space_check(const config_t *cfg, int rom_id, const char *folder,
+                          const char *fs_name, uint64_t size, bool have_zip,
+                          space_check_t *sc)
+{
+    memset(sc, 0, sizeof(*sc));
+    sc->need = have_zip ? 0 : size;
+
+    if (zip_is_archive_name(fs_name))
+    {
+        zip_entry_t e;
+        char err[128] = "";
+        bool found;
+        if (have_zip)
+        {
+            char path[CFG_PATH_MAX + 256];
+            download_target(cfg, folder, fs_name, path, sizeof(path));
+            FILE *f = fopen(path, "rb");
+            found = f && zip_find_rom(f, rom_exts(folder), &e, err, sizeof(err));
+            if (f)
+                fclose(f);
+        }
+        else
+        {
+            remote_zip_t rz = { 0 };
+            char url_path[768];
+            found = content_path(rom_id, fs_name, url_path, sizeof(url_path));
+            rz.path = url_path;
+            zip_reader_t rd = { remote_read, &rz, size };
+            found = found && zip_find_rom_r(&rd, rom_exts(folder), &e, err, sizeof(err));
+            buf_free(&rz.buf);
+        }
+        if (found)
+        {
+            sc->rom_size = e.size;
+            sc->need += e.size;
+        }
+        else
+        {
+            // Unknown: check the archive alone, extraction checks again
+            snprintf(sc->note, sizeof(sc->note), "ROM size unknown (%.100s)", err);
+        }
+    }
+
+    sc->need += 1024 * 1024; // Cluster rounding, directory entries
+    if (!download_free_space(cfg, &sc->free))
+    {
+        snprintf(sc->note, sizeof(sc->note), "free space unknown");
+        return true; // Don't block; allocation fails cleanly if it is full
+    }
+    return sc->free >= sc->need;
 }

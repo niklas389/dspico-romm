@@ -86,21 +86,19 @@ static bool ext_in_list(const char *name, const char *exts)
 }
 
 // Locates the central directory. Returns false if this is no zip file.
-static bool find_cd(FILE *f, uint64_t *cd_off, uint64_t *cd_size, uint64_t *count)
+static bool find_cd(const zip_reader_t *r, uint64_t *cd_off, uint64_t *cd_size,
+                    uint64_t *count)
 {
-    if (fseeko(f, 0, SEEK_END) != 0)
-        return false;
-    off_t fsize = ftello(f);
-    if (fsize < 22)
+    if (r->size < 22)
         return false;
 
-    size_t scan = fsize < EOCD_SCAN ? (size_t)fsize : EOCD_SCAN;
+    size_t scan = r->size < EOCD_SCAN ? (size_t)r->size : EOCD_SCAN;
     uint8_t *buf = malloc(scan);
     if (!buf)
         return false;
-    uint64_t base = (uint64_t)fsize - scan;
+    uint64_t base = r->size - scan;
     bool ok = false;
-    if (read_at(f, base, buf, scan))
+    if (r->read(r->ctx, base, buf, scan))
     {
         for (size_t i = scan - 22 + 1; i-- > 0;)
         {
@@ -115,7 +113,7 @@ static bool find_cd(FILE *f, uint64_t *cd_off, uint64_t *cd_size, uint64_t *coun
             if (i >= 20 && rd32(buf + i - 20) == 0x07064b50)
             {
                 uint8_t z[56];
-                if (read_at(f, rd64(buf + i - 20 + 8), z, sizeof(z)) &&
+                if (r->read(r->ctx, rd64(buf + i - 20 + 8), z, sizeof(z)) &&
                     rd32(z) == 0x06064b50)
                 {
                     *count = rd64(z + 32);
@@ -132,11 +130,29 @@ static bool find_cd(FILE *f, uint64_t *cd_off, uint64_t *cd_size, uint64_t *coun
     return ok;
 }
 
-bool zip_find_rom(FILE *f, const char *exts, zip_entry_t *best, char *err, int err_len)
+static bool file_read(void *ctx, uint64_t off, void *buf, size_t n)
+{
+    return read_at(ctx, off, buf, n);
+}
+
+bool zip_find_rom(FILE *f, const char *exts, zip_entry_t *e, char *err, int err_len)
+{
+    zip_reader_t r = { file_read, f, 0 };
+    if (fseeko(f, 0, SEEK_END) != 0)
+    {
+        snprintf(err, err_len, "can't read the archive");
+        return false;
+    }
+    r.size = (uint64_t)ftello(f);
+    return zip_find_rom_r(&r, exts, e, err, err_len);
+}
+
+bool zip_find_rom_r(const zip_reader_t *r, const char *exts, zip_entry_t *best,
+                    char *err, int err_len)
 {
     memset(best, 0, sizeof(*best));
     uint64_t cd_off, cd_size, count;
-    if (!find_cd(f, &cd_off, &cd_size, &count))
+    if (!find_cd(r, &cd_off, &cd_size, &count))
     {
         snprintf(err, err_len, "not a zip file");
         return false;
@@ -147,7 +163,7 @@ bool zip_find_rom(FILE *f, const char *exts, zip_entry_t *best, char *err, int e
         return false;
     }
     uint8_t *cd = malloc(cd_size ? cd_size : 1);
-    if (!cd || !read_at(f, cd_off, cd, cd_size))
+    if (!cd || !r->read(r->ctx, cd_off, cd, cd_size))
     {
         free(cd);
         snprintf(err, err_len, "can't read the zip directory");

@@ -508,6 +508,27 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
     uint64_t zsize = 0;
     bool have_zip = archive && download_exists(&g_cfg, folder, fs_name, &zsize) &&
                     zsize == size;
+
+    // Download and extraction must fit: archive + ROM inside at the peak
+    printf("\x1b[6;0HChecking free space...\n");
+    space_check_t sc;
+    bool fits = download_space_check(&g_cfg, rom_id, folder, fs_name, size, have_zip, &sc);
+    char need_s[16], free_s[16], rom_s[16];
+    format_size(sc.need, need_s, sizeof(need_s));
+    format_size(sc.free, free_s, sizeof(free_s));
+    format_size(sc.rom_size, rom_s, sizeof(rom_s));
+    log_printf("\n[Space] need %s%s%s, free %s%s%s\n", need_s,
+               sc.rom_size ? " incl. unpacked ROM " : "", sc.rom_size ? rom_s : "",
+               free_s, sc.note[0] ? "; " : "", sc.note);
+    printf("\x1b[6;0H                         \n");
+    if (!fits)
+    {
+        printf("\x1b[10;0HNot enough space on the SD card:\nneeds %s, %s free.\n",
+               need_s, free_s);
+        press_any_key();
+        return;
+    }
+
     if (have_zip)
         log_printf("\n[Download] archive already on SD, unpacking it\n");
     else

@@ -75,4 +75,23 @@ bool download_local(const config_t *cfg, const char *folder, const char *fs_name
 bool download_extract(const config_t *cfg, const char *folder, const char *zip_name,
                       zip_progress_fn cb, void *ctx, extract_result_t *res);
 
+// Free space on the library's drive.
+bool download_free_space(const config_t *cfg, uint64_t *bytes);
+
+// Space check before a download: the file, plus for an archive the ROM
+// inside (its size comes from the archive's central directory, read with a
+// Range request, or from the local archive when have_zip). False if it
+// doesn't fit; also true when the free space can't be determined.
+typedef struct
+{
+    uint64_t need;       // Bytes needed at the peak (archive + ROM)
+    uint64_t free;
+    uint64_t rom_size;   // ROM inside the archive, 0 if not an archive/unknown
+    char note[128];
+} space_check_t;
+
+bool download_space_check(const config_t *cfg, int rom_id, const char *folder,
+                          const char *fs_name, uint64_t size, bool have_zip,
+                          space_check_t *sc);
+
 #endif

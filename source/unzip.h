@@ -50,6 +50,17 @@ typedef struct
 // separated, e.g. "nds,dsi,srl"), else fails. False with err set on errors.
 bool zip_find_rom(FILE *f, const char *exts, zip_entry_t *e, char *err, int err_len);
 
+// Same, reading through a callback (e.g. HTTP Range requests, to learn the
+// ROM size before downloading). size: archive size.
+typedef struct
+{
+    bool (*read)(void *ctx, uint64_t off, void *buf, size_t n);
+    void *ctx;
+    uint64_t size;
+} zip_reader_t;
+bool zip_find_rom_r(const zip_reader_t *r, const char *exts, zip_entry_t *e,
+                    char *err, int err_len);
+
 bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
                  zip_progress_fn cb, void *ctx, zip_stats_t *st);
 

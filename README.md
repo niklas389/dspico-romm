@@ -132,6 +132,10 @@ unpacking is cancelled or fails for another reason than corrupt data, the
 archive stays on the SD card and the next A unpacks it without downloading.
 The log line `read / inflate / crc / SD wait` shows where the time goes.
 
+Before downloading, the app checks that the archive and the unpacked ROM fit
+on the SD card at the same time. The ROM size comes from the archive's
+central directory, fetched with one Range request for the last ~64 KB.
+
 ## Library index
 
 Opening a platform updates a local index on the SD card

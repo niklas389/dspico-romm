@@ -535,6 +535,22 @@ bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *f
     return perform(path, NULL, true, false, range, &x);
 }
 
+bool net_get_range(const char *path, uint64_t first, uint64_t last, buf_t *out,
+                   net_result_t *res)
+{
+    char range[48];
+    snprintf(range, sizeof(range), "%llu-%llu", (unsigned long long)first,
+             (unsigned long long)last);
+    xfer_t x = { .mem = out, .res = res };
+    bool ok = perform(path, NULL, true, false, range, &x);
+    if (!ok && lost_wifi(res) && net_wifi_ensure())
+    {
+        buf_free(out);
+        ok = perform(path, NULL, true, false, range, &x);
+    }
+    return ok;
+}
+
 bool net_download_range_async(const char *path, uint64_t first, uint64_t last,
                               sdwriter_t *sdw, net_progress_fn cb, void *ctx,
                               net_result_t *res)
