@@ -91,6 +91,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.52 | – | – | Battery icon in the status bar (4 segments from the DSi level 0..15, green while charging, red when nearly empty; read every 10 s) |
 | 0.53 | – | – | Artwork: 2D box art first (fallback cover), whole picture with aspect ratio (cache format v2, re-downloaded once); top cover shown at once on selection; tiles near the selection loaded every frame; cover result kept when a key interrupts the download; details page fetches its cover if missing; faster scrolling (animation, key repeat) |
 | 0.54 | – | – | Strip: 2D box art; top screen: cover (as in 0.51). Cover cache per platform, read with one folder scan (no per-game file lookups); images load only when the strip stands still; downloads only after 0.5 s of rest |
+| 0.55 | – | – | Artwork speed: streaming PNG decoder (zlib, row-wise scaling, yields every ~4 ms), TJpgDec for JPEG at 1/2..1/8 scale, stb_image only as fallback; per-image fetch/decode timing in the log; art=box2d/cover setting; "Download all artwork" in the tools menu |
 | 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
 | 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
 | 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
@@ -139,6 +140,13 @@ per platform, `romm/covers/<platform id>/` (`<rom id>.tl` strip image, `.tp` top
 image, `.tln`/`.tpn` = no artwork), read once when the platform opens. Missing
 images are downloaded in the background only while the selection rests for
 0.5 s: first the selected game's cover, then strip images nearest to it.
+Decoding: PNG with an own streaming decoder (zlib inflate row by row, each row
+scaled down at once, no full-size buffer), baseline JPEG with TJpgDec at 1/2 to
+1/8 size, other files with stb_image. PNG and JPEG decoding yields to the UI
+every ~4 ms. Each image logs its size, fetch and decode time (`[Cover]`).
+`art=cover` in config.ini uses the small cover in the strip instead of the box
+art (much smaller files). Tools (SELECT) > "Download all artwork" loads every
+missing image of the platform in one go.
 Older caches (`romm/covers/*.cov`, `*.cv2`, `*.none`, `*.nn2`) are no longer
 used and can be deleted. Games without a
 cover keep the placeholder (initials on a colour).

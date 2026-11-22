@@ -6,7 +6,7 @@
 // format, one folder per platform: <base>/covers/<platform id>/
 //   <rom id>.tl  strip image: 2D box art (ScreenScraper "box2d", stored by RomM
 //                next to the cover), else the cover; whole picture, at most
-//                TILE_S x TILE_S
+//                TILE_S x TILE_S (.tc: from the cover, config art=cover)
 //   <rom id>.tp  top screen image: the cover (path_cover_small) filling
 //                COVER_W x COVER_H, else the box art fitted into it
 //   <rom id>.tln / .tpn  no usable artwork for that image
@@ -25,6 +25,9 @@
 enum { COV_UNKNOWN, COV_CACHED, COV_NONE, COV_MISSING };
 enum { COV_TILE, COV_TOP };
 
+// Strip image source: true = 2D box art first (config art=box2d), false = cover
+extern bool cover_tile_box2d;
+
 // Reads the platform's cover folder once (yielding to other threads) and sets
 // the state of both images for each game (state arrays of n entries).
 void cover_scan(const config_t *cfg, int platform_id, const rom_entry_t *e, int n,
@@ -37,6 +40,26 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
 // out: TILE_S^2 or COVER_W*COVER_H pixels; *w, *h: the image size
 bool cover_load(const config_t *cfg, int platform_id, int rom_id, int kind, uint16_t *out,
                 int *w, int *h);
+
+// Streaming box-filter scaler: source rows in, RGB15 out (covers_img.c)
+typedef struct
+{
+    int w, h;                // Source size
+    int cx, cy, cw, ch;      // Source window used (crop)
+    int dw, dh;              // Output size
+    uint16_t *out;
+    uint32_t *acc;           // r, g, b, count per output column
+    uint16_t *xmap;          // Source column -> output column
+    int oy;                  // Output row being accumulated
+} rowscale_t;
+
+void rs_geometry(int w, int h, bool fill, int maxw, int maxh, int *cx, int *cy, int *cw,
+                 int *ch, int *dw, int *dh);
+bool rs_init(rowscale_t *rs, int w, int h, bool fill, int maxw, int maxh, uint16_t *out);
+// One source row (y ascending); bpp 3 = RGB, 4 = RGBA (alpha over the UI background)
+void rs_row(rowscale_t *rs, int y, const uint8_t *px, int bpp);
+void rs_finish(rowscale_t *rs);
+void rs_free(rowscale_t *rs);
 
 // Scaling of decoded RGB888 pixels (covers_img.c, also used by the host test)
 void cover_fit(const uint8_t *rgb, int w, int h, uint16_t *out, int maxw, int maxh, int *ow,

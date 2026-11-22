@@ -27,7 +27,7 @@ WND_BYTES	?= 5840
 
 SOURCEDIRS	:= source
 INCLUDEDIRS	:= source source/third_party/cjson source/third_party/qrcodegen \
-		   source/third_party/stb \
+		   source/third_party/stb source/third_party/tjpgd \
 		   source/third_party/openssl-armv4
 
 # The ARM7 core must match the DSWiFi build (shared RX buffer layout).
@@ -43,7 +43,7 @@ LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.54.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+DEFINES		:= -DPOC_VERSION=\"0.55.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
 		   -DTCP_WND_BYTES=$(WND_BYTES) $(EXTRA_DEFINES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile

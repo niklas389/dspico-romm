@@ -30,6 +30,11 @@ a7dma=1
 ; the DSi off. Set to 0 if Wi-Fi does not start at all with it.
 wifireset=1
 
+; Artwork in the game strip: box2d = 2D box art (full size from ScreenScraper,
+; slower to load), cover = RomM's small cover (about 5-25x fewer pixels).
+; The top screen always shows the cover.
+art=box2d
+
 ; 1 = skip certificate verification. Diagnostics only.
 insecure=0
 

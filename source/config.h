@@ -20,6 +20,7 @@ typedef struct
     bool a7cmd53;                // ARM7: status + lookahead in one CMD53 (default on)
     bool a7dma;                  // ARM7: SDIO DMA straight into the RX ring (default on)
     bool wifireset;              // Power-cycle the Wi-Fi module at start (default on)
+    bool art_box2d;              // Strip artwork: 2D box art (default) or the small cover
     int mtu;                     // Wi-Fi MTU, sets the TCP MSS (default 1500)
     bool insecure;               // Skip certificate verification (diagnostics only)
     bool verbose;                // Write curl debug traces to the log file

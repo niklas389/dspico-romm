@@ -12,16 +12,21 @@
 #include "log.h"
 #include "net.h"
 
-#define STBI_ONLY_PNG
-#define STBI_ONLY_JPEG
-#define STBI_NO_STDIO
-#define STBI_NO_HDR
-#define STBI_NO_LINEAR
-#define STBI_NO_FAILURE_STRINGS
-#include "stb_image.h"
+#include "imgdec.h"
 
-static const char *const ext_img[2] = { "tl", "tp" };
-static const char *const ext_none[2] = { "tln", "tpn" };
+bool cover_tile_box2d = true;
+
+// Strip images from box art (.tl) and from the cover (.tc) are kept apart, so
+// changing art= in config.ini takes effect without deleting the cache
+static const char *ext_img_k(int kind)
+{
+    return kind == COV_TOP ? "tp" : cover_tile_box2d ? "tl" : "tc";
+}
+
+static const char *ext_none_k(int kind)
+{
+    return kind == COV_TOP ? "tpn" : cover_tile_box2d ? "tln" : "tcn";
+}
 
 static void plat_dir(const config_t *cfg, int platform_id, char *out, int len)
 {
@@ -82,11 +87,11 @@ void cover_scan(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
             if (!m)
                 continue;
             const char *x = dot + 1;
-            if (!strcmp(x, "tl"))
+            if (!strcmp(x, ext_img_k(COV_TILE)))
                 tile[m->idx] = COV_CACHED;
             else if (!strcmp(x, "tp"))
                 top[m->idx] = COV_CACHED;
-            else if (!strcmp(x, "tln") && tile[m->idx] != COV_CACHED)
+            else if (!strcmp(x, ext_none_k(COV_TILE)) && tile[m->idx] != COV_CACHED)
                 tile[m->idx] = COV_NONE;
             else if (!strcmp(x, "tpn") && top[m->idx] != COV_CACHED)
                 top[m->idx] = COV_NONE;
@@ -99,7 +104,7 @@ void cover_scan(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
 static void mark_none(const config_t *cfg, int platform_id, int rom_id, int kind)
 {
     char p[CFG_PATH_MAX + 64];
-    file_path(cfg, platform_id, rom_id, ext_none[kind], p, sizeof(p));
+    file_path(cfg, platform_id, rom_id, ext_none_k(kind), p, sizeof(p));
     FILE *f = fopen(p, "wb");
     if (f)
         fclose(f);
@@ -133,32 +138,6 @@ static bool fetch(const char *srv_path, buf_t *body, long *status)
     return true;
 }
 
-// Decodes PNG/JPEG; NULL if not decodable or unreasonably large
-static uint8_t *decode(const buf_t *b, int *w, int *h)
-{
-    int comp;
-    if (!stbi_info_from_memory((const stbi_uc *)b->data, (int)b->len, w, h, &comp) ||
-        (long)*w * *h > 1600L * 1600L || *w < 8 || *h < 8)
-        return NULL;
-    return stbi_load_from_memory((const stbi_uc *)b->data, (int)b->len, w, h, &comp, 3);
-}
-
-// Downloads and decodes one source; *status: HTTP status (0: not tried)
-static uint8_t *get_image(const char *path, int *w, int *h, long *status)
-{
-    *status = 0;
-    if (!path || !path[0])
-        return NULL;
-    buf_t body = { 0 };
-    if (!fetch(path, &body, status))
-        return NULL;
-    uint8_t *rgb = decode(&body, w, h);
-    if (!rgb)
-        *status = 415; // Not decodable: treat like "no artwork"
-    buf_free(&body);
-    return rgb;
-}
-
 int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int kind)
 {
     if (!e->cover || !e->cover[0])
@@ -171,25 +150,49 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
     if (c)
         snprintf(box, sizeof(box), "%.*s/box2d/box2d.png", (int)(c - e->cover), e->cover);
 
-    // Strip: box art first; top screen: cover first
-    const char *first = kind == COV_TILE ? box : e->cover;
-    const char *second = kind == COV_TILE ? e->cover : box;
-    int w = 0, h = 0;
-    long st1, st2 = 0;
-    bool from_first = true;
-    uint8_t *rgb = get_image(first, &w, &h, &st1);
-    if (!rgb)
+    // Strip: box art first (art=box2d) or the cover; top screen: cover first
+    bool box_first = kind == COV_TILE && cover_tile_box2d;
+    const char *src[2] = { box_first ? box : e->cover, box_first ? e->cover : box };
+    static uint16_t px[COVER_W * COVER_H];
+    int ow = 0, oh = 0;
+    long st[2] = { 0, 0 };
+    bool ok = false;
+    int used = -1;
+    for (int k = 0; k < 2 && !ok; k++)
     {
-        from_first = false;
-        rgb = get_image(second, &w, &h, &st2);
+        if (!src[k][0])
+            continue;
+        uint32_t t0 = net_now_ms();
+        buf_t body = { 0 };
+        if (!fetch(src[k], &body, &st[k]))
+            continue;
+        uint32_t t1 = net_now_ms();
+        // Top screen: the cover fills 90x120; box art and strip images are
+        // shown whole
+        bool fill = kind == COV_TOP && src[k] == e->cover;
+        imgdec_info_t inf;
+        ok = imgdec_scaled((const uint8_t *)body.data, body.len, fill,
+                           kind == COV_TILE ? TILE_S : COVER_W,
+                           kind == COV_TILE ? TILE_S : COVER_H, px, &ow, &oh, &inf);
+        uint32_t t2 = net_now_ms();
+        log_printf("[Cover] %d %s %s: %u B, %dx%d %s, fetch %lu ms, decode %lu ms%s\n", e->id,
+                   ext_img_k(kind), src[k] == box ? "box2d" : "cover", (unsigned)body.len,
+                   inf.w, inf.h, inf.how ? inf.how : "-", (unsigned long)(t1 - t0),
+                   (unsigned long)(t2 - t1), ok ? "" : " FAILED");
+        buf_free(&body);
+        if (!ok)
+            st[k] = 415; // Not decodable: like "no artwork"
+        else
+            used = k;
     }
-    if (!rgb)
+    (void)used;
+    if (!ok)
     {
-        log_printf("[Cover] %d %s: HTTP %ld / %ld\n", e->id, ext_img[kind], st1, st2);
+        log_printf("[Cover] %d %s: HTTP %ld / %ld\n", e->id, ext_img_k(kind), st[0], st[1]);
         // Nothing usable (404, not decodable): don't ask again. Server or
         // network errors are retried in a later session.
-        bool final = (st1 == 404 || st1 == 415 || st1 == 0) &&
-                     (st2 == 404 || st2 == 415 || st2 == 0);
+        bool final = (st[0] == 404 || st[0] == 415 || st[0] == 0) &&
+                     (st[1] == 404 || st[1] == 415 || st[1] == 0);
         if (final)
         {
             char dir[CFG_PATH_MAX + 32];
@@ -203,27 +206,12 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
         return COV_MISSING;
     }
 
-    static uint16_t px[COVER_W * COVER_H];
-    int ow, oh;
-    if (kind == COV_TILE)
-        cover_fit(rgb, w, h, px, TILE_S, TILE_S, &ow, &oh);
-    else if (from_first)
-    {
-        cover_fill(rgb, w, h, px, COVER_W, COVER_H);
-        ow = COVER_W;
-        oh = COVER_H;
-    }
-    else
-        cover_fit(rgb, w, h, px, COVER_W, COVER_H, &ow, &oh);
-    stbi_image_free(rgb);
-    log_file_only("[Cover] %d %s: %dx%d\n", e->id, ext_img[kind], w, h);
-
     char dir[CFG_PATH_MAX + 32], p[CFG_PATH_MAX + 64], tmp[CFG_PATH_MAX + 72];
     config_path(cfg, "covers", dir, sizeof(dir));
     mkdir(dir, 0777);
     plat_dir(cfg, platform_id, dir, sizeof(dir));
     mkdir(dir, 0777);
-    file_path(cfg, platform_id, e->id, ext_img[kind], p, sizeof(p));
+    file_path(cfg, platform_id, e->id, ext_img_k(kind), p, sizeof(p));
     snprintf(tmp, sizeof(tmp), "%s.tmp", p);
     FILE *f = fopen(tmp, "wb");
     if (!f)
@@ -243,7 +231,7 @@ bool cover_load(const config_t *cfg, int platform_id, int rom_id, int kind, uint
                 int *w, int *h)
 {
     char p[CFG_PATH_MAX + 64];
-    file_path(cfg, platform_id, rom_id, ext_img[kind], p, sizeof(p));
+    file_path(cfg, platform_id, rom_id, ext_img_k(kind), p, sizeof(p));
     FILE *f = fopen(p, "rb");
     if (!f)
         return false;

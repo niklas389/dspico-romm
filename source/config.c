@@ -78,6 +78,7 @@ bool config_load(config_t *cfg)
     cfg->a7cmd53 = true;
     cfg->a7dma = true;
     cfg->wifireset = true;
+    cfg->art_box2d = true;
     cfg->sdraw = true;
 
     if (!find_base_dir(cfg))
@@ -141,6 +142,10 @@ bool config_load(config_t *cfg)
         else if (strcasecmp(key, "a7dma") == 0)
         {
             cfg->a7dma = parse_bool(val);
+        }
+        else if (strcasecmp(key, "art") == 0)
+        {
+            cfg->art_box2d = strcasecmp(val, "cover") != 0;
         }
         else if (strcasecmp(key, "wifireset") == 0)
         {

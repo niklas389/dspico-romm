@@ -1370,10 +1370,16 @@ static void show_log_tail(void)
 }
 
 // e/folder: the selected game, NULL on the platform screen
-static void tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
+// Returns 1 if "Download all artwork" was chosen (handled by the game screen)
+static int tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
 {
-    const char *items[4];
-    int act[4], n = 0, sel = 0;
+    const char *items[5];
+    int act[5], n = 0, sel = 0;
+    if (e)
+    {
+        items[n] = "Download all artwork (this platform)";
+        act[n++] = 4;
+    }
     items[n] = "Show log";
     act[n++] = 0;
     if (e)
@@ -1397,7 +1403,7 @@ static void tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
         else if ((k & KEY_UP) && sel > 0)
             sel--;
         else if (k & KEY_B)
-            return;
+            return 0;
         else if (k & KEY_A)
         {
             if (act[sel] == 0)
@@ -1422,8 +1428,10 @@ static void tools_menu(const rom_entry_t *e, const char *folder, bool on_sd)
                 console_wait();
                 console_end();
             }
+            else if (act[sel] == 4)
+                return 1;
             else
-                return;
+                return 0;
         }
     }
 }
@@ -1979,6 +1987,74 @@ static void games_load_tiles(games_t *g, int sel)
         }
 }
 
+// Tools: downloads every missing image of the platform in one go (like a
+// scraper), so browsing only reads the SD card afterwards. B cancels.
+static void art_bulk(games_t *g)
+{
+    int n = g->idx.count;
+    if (!g->cov_scanned)
+    {
+        cover_scan(&g_cfg, g->platform_id, g->idx.e, n, g->cov, g->covp);
+        g->cov_scanned = true;
+    }
+    int total = 0;
+    for (int i = 0; i < n; i++)
+        total += (g->cov[i] == COV_MISSING || g->cov[i] == COV_FAILED) +
+                 (g->covp[i] == COV_MISSING || g->covp[i] == COV_FAILED);
+    if (total == 0)
+    {
+        message(UI_OK, "All artwork is on the SD card", NULL, NULL);
+        return;
+    }
+    log_printf("\n[Artwork] %s: %d images to load\n", g->platform_name, total);
+    int done = 0, loaded = 0, none = 0, failed = 0;
+    uint32_t t0 = net_now_ms();
+    bool cancel = false;
+    for (int i = 0; i < n && !cancel; i++)
+        for (int kind = COV_TILE; kind <= COV_TOP && !cancel; kind++)
+        {
+            uint8_t *st = kind == COV_TILE ? &g->cov[i] : &g->covp[i];
+            if (*st != COV_MISSING && *st != COV_FAILED)
+                continue;
+            char l1[48], l2[64];
+            snprintf(l1, sizeof(l1), "%d / %d images", done, total);
+            uint32_t ms = net_now_ms() - t0;
+            if (done)
+            {
+                uint32_t left = ms / done * (total - done) / 1000;
+                snprintf(l2, sizeof(l2), "%d loaded, %d without art  \xC2\xB7  %lu:%02lu left",
+                         loaded, none, (unsigned long)(left / 60), (unsigned long)(left % 60));
+            }
+            else
+                snprintf(l2, sizeof(l2), "Starting...");
+            ui_progress_t p = { "Downloading artwork", g->idx.e[i].name, done * 1000 / total,
+                                l1, l2, { NULL }, 0, "B: cancel", UI_INFO };
+            ui_draw_progress(gfx_bot, &p);
+            gfx_present_now();
+            scanKeys();
+            if (keysDown() & KEY_B)
+            {
+                cancel = true;
+                break;
+            }
+            int r = cover_fetch(&g_cfg, g->platform_id, &g->idx.e[i], kind);
+            *st = (uint8_t)(r == COV_MISSING ? COV_FAILED : r);
+            loaded += r == COV_CACHED;
+            none += r == COV_NONE;
+            failed += r == COV_MISSING;
+            done++;
+        }
+    uint32_t ms = net_now_ms() - t0;
+    log_printf("  %d loaded, %d without artwork, %d failed%s, %lu ms (%lu ms per image)\n",
+               loaded, none, failed, cancel ? ", cancelled" : "", (unsigned long)ms,
+               (unsigned long)(done ? ms / done : 0));
+    char body[160];
+    snprintf(body, sizeof(body), "%d images loaded, %d games without artwork%s%.0d%s.", loaded,
+             none, failed ? ", " : "", failed, failed ? " failed (try again later)" : "");
+    message(cancel ? UI_INFO : failed ? UI_WARN : UI_OK,
+            cancel ? "Artwork download cancelled" : "Artwork downloaded", body, NULL);
+}
+
 static void browse_platform(int platform_id, const char *platform_name,
                             const char *folder)
 {
@@ -2198,7 +2274,8 @@ static void browse_platform(int platform_id, const char *platform_name,
             }
             else if (k & KEY_SELECT)
             {
-                tools_menu(e, folder, g.on_sd[sel]);
+                if (tools_menu(e, folder, g.on_sd[sel]) == 1)
+                    art_bulk(&g);
                 shown = -1;
             }
             else if (k & KEY_Y)
@@ -2435,7 +2512,7 @@ static void step_platforms(void)
         }
         else if (k & KEY_SELECT)
         {
-            tools_menu(NULL, NULL, false);
+            (void)tools_menu(NULL, NULL, false);
             shown = -1;
         }
         else if ((k & KEY_A) && p && edit)
@@ -2508,6 +2585,8 @@ int main(int argc, char **argv)
 
     log_printf("Config: %sconfig.ini\n", g_cfg.base_dir);
     log_printf("Save slot: %s\n", g_cfg.save_slot);
+    cover_tile_box2d = g_cfg.art_box2d;
+    log_printf("Artwork in the strip: %s\n", g_cfg.art_box2d ? "box2d" : "cover");
     log_file_only("URL: %s insecure=%d verbose=%d\n", g_cfg.url, g_cfg.insecure,
                   g_cfg.verbose);
     {
