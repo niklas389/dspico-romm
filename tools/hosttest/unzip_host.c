@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Host test for source/unzip.c: extracts the ROM of a zip to a file.
-//   Z=source/third_party/zlib
-//   cc -O2 -Isource tools/hosttest/unzip_host.c source/unzip.c \
-//      source/crc32fast.itcm.arm.c -x c $Z/inflate.arm.c $Z/inffast.itcm.arm.c \
-//      $Z/inftrees.arm.c $Z/zutil.c $Z/adler32.c -o unzip_host
+//   cc -O2 -Isource tools/hosttest/unzip_host.c source/unzip.c
+//      source/crc32fast.itcm.arm.c -lz -o unzip_host  (one line)
 //   ./unzip_host in.zip exts out.bin [sink_chunk]
 #include <stdio.h>
 #include <stdlib.h>

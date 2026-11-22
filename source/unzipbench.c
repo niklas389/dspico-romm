@@ -16,15 +16,12 @@
 #include "crc32fast.h"
 #include "log.h"
 #include "prof.h"
+#include "unzip.h"
 
 size_t zb_sys_deflate(const void *in, size_t n, void *out, size_t cap);
 uint64_t zb_sys_inflate(const void *in, size_t n, uint8_t *out, size_t step,
                         uint32_t (*crcfn)(uint32_t, const void *, size_t), uint32_t *crc);
 uint32_t zb_sys_crc32(uint32_t crc, const void *p, size_t n);
-uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
-                           bool fast_in_itcm, bool state_in_itcm,
-                           uint32_t (*crcfn)(uint32_t, const void *, size_t),
-                           uint32_t *crc);
 
 #define STEP (32 * 1024) // Output per inflate() call, as in unzip.c
 
@@ -97,29 +94,21 @@ void unzip_bench(const char *rom_path)
     c = zb_sys_crc32(0, raw, n);
     row("zlib crc32 (toolchain)", n, prof_ticks() - t0, c == ref);
     t0 = prof_ticks();
-    c = crc32_fast_ram(0, raw, n);
-    row("slicing-4, code+tables RAM", n, prof_ticks() - t0, c == ref);
-    t0 = prof_ticks();
     c = crc32_fast(0, raw, n);
     row("slicing-4, code+tables ITCM", n, prof_ticks() - t0, c == ref);
 
     printf("Inflate...\n");
     log_printf("  inflate to %lu KB (inflate() time only):\n", (unsigned long)(n / 1024));
     uint64_t tk = zb_sys_inflate(comp, cn, out, STEP, crc32_fast, &c);
-    row("toolchain zlib 1.4", n, tk, tk && c == ref);
+    row("toolchain zlib (default alloc)", n, tk, tk && c == ref);
 
-    static const struct { const char *name; bool fast_itcm, state_itcm; } v[] = {
-        { "own 1.3.1, loop RAM, state RAM", false, false },
-        { "own 1.3.1, loop RAM, state ITCM", false, true },
-        { "own 1.3.1, loop ITCM, state RAM", true, false },
-        { "own 1.3.1, loop ITCM, state ITCM", true, true },
-    };
-    for (size_t i = 0; i < sizeof(v) / sizeof(v[0]); i++)
-    {
-        tk = zip_bench_inflate(comp, cn, out, STEP, v[i].fast_itcm, v[i].state_itcm,
-                               crc32_fast, &c);
-        row(v[i].name, n, tk, tk && c == ref);
-    }
+    // zip_bench_inflate returns microseconds
+    uint64_t us = zip_bench_inflate(comp, cn, out, STEP, false, crc32_fast, &c);
+    row("toolchain zlib, state RAM (alloc)", n, us * BUS_CLOCK / 1000000, us && c == ref);
+    us = zip_bench_inflate(comp, cn, out, STEP, true, crc32_fast, &c);
+    row(unzip_state_was_itcm ? "toolchain zlib, state ITCM"
+                             : "toolchain zlib, state ITCM (DID NOT FIT)",
+        n, us * BUS_CLOCK / 1000000, us && c == ref);
 
 done:
     free(raw);

@@ -133,8 +133,9 @@ archive stays on the SD card and the next A unpacks it without downloading.
 The log line `read / inflate / crc / SD wait` shows where the time goes.
 On a DSpico the archive is read with interrupt-driven DMA reads (4 × 64 KB
 read-ahead, queued with the writes in the same engine, `sdraw.c`), the
-inflate loop (own zlib 1.3.1 copy, `third_party/zlib`), its state and the
-CRC-32 tables run from ITCM.
+inflate state (zlib's decoding tables) is allocated in ITCM and the CRC-32
+(slicing-by-4) runs from ITCM with its tables. X in the ROM detail view runs
+a CPU test of these on the first 4 MB of a ROM on the SD card.
 
 Before downloading, the app checks that the archive and the unpacked ROM fit
 on the SD card at the same time. The ROM size comes from the archive's

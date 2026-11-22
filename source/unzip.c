@@ -9,7 +9,7 @@
 #include <string.h>
 #include <strings.h>
 
-#include "third_party/zlib/zlib.h" // Own copy (z_ prefix), see its README
+#include <zlib.h> // Toolchain zlib 1.4 (faster than 1.3.1 here, see unzipbench)
 
 #ifdef __NDS__
 #include <nds.h>
@@ -42,7 +42,8 @@ static void yield(void)
 #else
 #define STATE_MEM
 #endif
-static uint8_t itcm_state[7680] STATE_MEM __attribute__((aligned(8)));
+static uint8_t itcm_state[8192] STATE_MEM __attribute__((aligned(8)));
+bool unzip_state_was_itcm; // Last inflateInit2 got the ITCM buffer
 static bool itcm_state_used;
 bool unzip_state_itcm = true;
 
@@ -53,6 +54,7 @@ static voidpf z_alloc(voidpf opaque, uInt items, uInt size)
     if (unzip_state_itcm && !itcm_state_used && n <= sizeof(itcm_state))
     {
         itcm_state_used = true;
+        unzip_state_was_itcm = true;
         return itcm_state;
     }
     return malloc(n);
@@ -388,6 +390,7 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
     {
         z.zalloc = z_alloc;
         z.zfree = z_free;
+        unzip_state_was_itcm = false;
         if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
         {
             snprintf(st->error, sizeof(st->error), "out of memory");
@@ -554,18 +557,13 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
 
 // --- Speed test --------------------------------------------------------------
 
-#ifdef __NDS__
-void z_inflate_fast(z_streamp strm, unsigned start);
-void z_inflate_fast_ram(z_streamp strm, unsigned start);
-extern void (*romm_inflate_fast)(z_streamp strm, unsigned start);
-
 uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
-                           bool fast_in_itcm, bool state_in_itcm,
+                           bool state_in_itcm,
                            uint32_t (*crcfn)(uint32_t, const void *, size_t),
                            uint32_t *crc)
 {
-    romm_inflate_fast = fast_in_itcm ? z_inflate_fast : z_inflate_fast_ram;
     unzip_state_itcm = state_in_itcm;
+    unzip_state_was_itcm = false;
 
     z_stream z;
     memset(&z, 0, sizeof(z));
@@ -582,16 +580,14 @@ uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
         {
             z.next_out = out;
             z.avail_out = (uInt)step;
-            uint64_t t0 = prof_ticks();
+            uint64_t t0 = now_us();
             r = inflate(&z, Z_NO_FLUSH);
-            ticks += prof_ticks() - t0;
+            ticks += now_us() - t0;
             c = crcfn(c, out, step - z.avail_out);
         }
         inflateEnd(&z);
     }
-    romm_inflate_fast = z_inflate_fast;
     unzip_state_itcm = true;
     *crc = c;
     return r == Z_STREAM_END ? (ticks ? ticks : 1) : 0;
 }
-#endif

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Host test for source/sdreader.c with a mock DMA engine (see unzip_host.c
-// for the zlib sources; add source/sdreader.c and a mock nds.h that defines
+// Host test for source/sdreader.c with a mock DMA engine (build like
+// unzip_host.c, plus source/sdreader.c and a mock nds.h that defines
 // an empty cothread_yield()).
 // sdreader + zip_extract_src with a mock engine: ops complete at once
 // (and sometimes only on the next yield-less get, to keep it simple: at once).

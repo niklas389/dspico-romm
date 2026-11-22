@@ -704,8 +704,7 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
         else if (strcasecmp(e->ext, "7z") == 0 || strcasecmp(e->ext, "rar") == 0)
             printf("(archive: not launchable)\n");
         printf("\x1b[21;0HA:download Y:speed test B:back");
-        if (*on_sd)
-            printf("\x1b[22;0HX:unzip CPU test (ROM on SD)");
+        printf("\x1b[22;0HX:unzip CPU test");
 
         u16 k = wait_key();
         if (k & KEY_B)
@@ -720,10 +719,16 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
             bench_run_suite(&g_cfg, e->id, e->fs_name, e->size);
             press_any_key();
         }
-        else if ((k & KEY_X) && *on_sd)
+        else if (k & KEY_X)
         {
             char name[256], path[CFG_PATH_MAX + 256];
-            if (download_local(&g_cfg, folder, e->fs_name, name, sizeof(name), NULL))
+            if (!download_local(&g_cfg, folder, e->fs_name, name, sizeof(name), NULL))
+            {
+                consoleClear();
+                printf("Unzip CPU test\n\nNeeds the ROM on the SD card:\ndownload it first (A).\n");
+                press_any_key();
+            }
+            else
             {
                 consoleClear();
                 printf("Unzip CPU test\n%.31s\n\n", name);

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
-// Speed test helpers using the toolchain's zlib (the one libcurl links), in
-// a file of their own because its zlib.h can't be mixed with the vendored
-// copy (third_party/zlib, z_ prefix).
+// Speed test helpers using the toolchain's zlib directly (default
+// allocator), for comparison with unzip.c's ITCM-state setup.
 
 #include <stdbool.h>
 #include <stdint.h>

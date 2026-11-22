@@ -83,6 +83,14 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
 
 // Speed test knob: inflate state in ITCM (default) or main RAM.
 extern bool unzip_state_itcm;
+extern bool unzip_state_was_itcm; // The last inflate state fit into ITCM
+
+// Speed test: inflates a raw deflate stream in steps; returns microseconds
+// spent in inflate(), 0 on error.
+uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
+                           bool state_in_itcm,
+                           uint32_t (*crcfn)(uint32_t, const void *, size_t),
+                           uint32_t *crc);
 
 // True for file names the library stores as archives (.zip).
 bool zip_is_archive_name(const char *name);

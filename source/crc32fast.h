@@ -10,7 +10,4 @@
 // the ARM9's 4 KB data cache (zlib's 5 KB of tables in main RAM do).
 uint32_t crc32_fast(uint32_t crc, const void *data, size_t len);
 
-// Same code and tables in main RAM (for the speed test).
-uint32_t crc32_fast_ram(uint32_t crc, const void *data, size_t len);
-
 #endif
