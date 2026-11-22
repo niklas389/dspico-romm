@@ -3,8 +3,33 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <unistd.h>
 
 static FILE *log_fp;
+static unsigned log_lines;
+static bool log_echo = true;
+
+void log_set_echo(bool on)
+{
+    log_echo = on;
+}
+
+// fflush() only reaches FatFs; the file size in the directory is written by
+// fsync()/fclose(). After a crash the log was 0 bytes: sync every 8 lines.
+static void log_maybe_sync(void)
+{
+    if (++log_lines % 8 == 0)
+        fsync(fileno(log_fp));
+}
+
+void log_sync(void)
+{
+    if (log_fp)
+    {
+        fflush(log_fp);
+        fsync(fileno(log_fp));
+    }
+}
 
 void log_open(const char *path)
 {
@@ -24,9 +49,12 @@ void log_printf(const char *fmt, ...)
 {
     va_list ap;
 
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
+    if (log_echo)
+    {
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        va_end(ap);
+    }
 
     if (log_fp)
     {
@@ -34,6 +62,7 @@ void log_printf(const char *fmt, ...)
         vfprintf(log_fp, fmt, ap);
         va_end(ap);
         fflush(log_fp);
+        log_maybe_sync();
     }
 }
 

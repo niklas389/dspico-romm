@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <ctype.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -71,6 +72,15 @@ bool config_load(config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
 
+    snprintf(cfg->save_slot, sizeof(cfg->save_slot), "autosave");
+    cfg->mtu = 1500;
+    cfg->zerocopy = true;
+    cfg->a7cmd53 = true;
+    cfg->a7dma = true;
+    cfg->wifireset = true;
+    cfg->art_box2d = true;
+    cfg->sdraw = true;
+
     if (!find_base_dir(cfg))
         return false;
 
@@ -104,6 +114,48 @@ bool config_load(config_t *cfg)
             size_t len = strlen(cfg->url);
             while (len > 0 && cfg->url[len - 1] == '/')
                 cfg->url[--len] = '\0';
+        }
+        else if (strcasecmp(key, "http_url") == 0)
+        {
+            snprintf(cfg->http_url, sizeof(cfg->http_url), "%s", val);
+            size_t len = strlen(cfg->http_url);
+            while (len > 0 && cfg->http_url[len - 1] == '/')
+                cfg->http_url[--len] = '\0';
+        }
+        else if (strcasecmp(key, "save_slot") == 0)
+        {
+            if (val[0])
+                snprintf(cfg->save_slot, sizeof(cfg->save_slot), "%s", val);
+        }
+        else if (strcasecmp(key, "sdraw") == 0)
+        {
+            cfg->sdraw = parse_bool(val);
+        }
+        else if (strcasecmp(key, "zerocopy") == 0)
+        {
+            cfg->zerocopy = parse_bool(val);
+        }
+        else if (strcasecmp(key, "a7cmd53") == 0)
+        {
+            cfg->a7cmd53 = parse_bool(val);
+        }
+        else if (strcasecmp(key, "a7dma") == 0)
+        {
+            cfg->a7dma = parse_bool(val);
+        }
+        else if (strcasecmp(key, "art") == 0)
+        {
+            cfg->art_box2d = strcasecmp(val, "cover") != 0;
+        }
+        else if (strcasecmp(key, "wifireset") == 0)
+        {
+            cfg->wifireset = parse_bool(val);
+        }
+        else if (strcasecmp(key, "mtu") == 0)
+        {
+            int v = atoi(val);
+            if (v >= 576 && v <= 1500)
+                cfg->mtu = v;
         }
         else if (strcasecmp(key, "insecure") == 0)
         {

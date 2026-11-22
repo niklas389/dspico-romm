@@ -1,0 +1,29 @@
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index c9176de..ff705d9 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -137,7 +137,7 @@ TWL_CODE static void Wifi_TWL_Update(void)
+         WifiData->stats[WSTAT_TXDATABYTES] += size;
+ 
+         // Exit if we have already handled a lot of packets
+-        if (cnt++ > 20)
++        if (cnt++ > 64)
+             break;
+     }
+ }
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index af95412..64f41c7 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -13,7 +13,10 @@
+ #include <dswifi_common.h>
+ 
+ // Space reserved for incoming and outgoing packets
+-#define WIFI_RXBUFFER_SIZE  (1024 * 12)
++#ifndef DSPICO_RXBUF_KB
++#define DSPICO_RXBUF_KB 12
++#endif
++#define WIFI_RXBUFFER_SIZE  (1024 * DSPICO_RXBUF_KB)
+ #define WIFI_TXBUFFER_SIZE  (1024 * 24)
+ 
+ // Value written in RX/TX buffers to restart the pointer to the beginning

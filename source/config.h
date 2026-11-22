@@ -12,7 +12,16 @@ typedef struct
 {
     char base_dir[CFG_PATH_MAX]; // e.g. "sd:/romm/" (always ends with '/')
     char url[CFG_URL_MAX];       // e.g. "https://romm.example.com" (no trailing '/')
+    char http_url[CFG_URL_MAX];  // Optional plain-HTTP URL, speed test only
     char token[CFG_TOKEN_MAX];   // Bearer token from device pairing, may be empty
+    char save_slot[32];          // RomM save slot to sync (default "autosave")
+    bool sdraw;                  // DSpico: DMA SD writes for downloads (default on)
+    bool zerocopy;               // Zero-copy Wi-Fi RX (default on)
+    bool a7cmd53;                // ARM7: status + lookahead in one CMD53 (default on)
+    bool a7dma;                  // ARM7: SDIO DMA straight into the RX ring (default on)
+    bool wifireset;              // Power-cycle the Wi-Fi module at start (default on)
+    bool art_box2d;              // Strip artwork: 2D box art (default) or the small cover
+    int mtu;                     // Wi-Fi MTU, sets the TCP MSS (default 1500)
     bool insecure;               // Skip certificate verification (diagnostics only)
     bool verbose;                // Write curl debug traces to the log file
 } config_t;

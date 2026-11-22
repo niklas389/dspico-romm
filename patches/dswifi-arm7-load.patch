@@ -1,0 +1,165 @@
+diff --git a/source/arm7/twl/card.twl.c b/source/arm7/twl/card.twl.c
+index 2dadd22..0f231ba 100644
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -13,6 +13,7 @@
+ #include <nds/arm7/serial.h>
+ 
+ #include "arm7/debug.h"
++#include "arm7/ipc.h"
+ #include "arm7/twl/card.h"
+ #include "arm7/twl/ndma.h"
+ #include "arm7/twl/rx_queue.h"
+@@ -27,6 +28,15 @@
+ 
+ static wifi_card_ctx wlan_ctx = {0};
+ 
++// dspico-romm: ARM7 time breakdown in scanlines (63.56 us). Single operations
++// are shorter than a line, but the sum of line differences is an unbiased
++// estimate of the total time.
++enum { A7P_CMD52_N, A7P_CMD52_L, A7P_BLK_N, A7P_BLK_L, A7P_QUEUE_L, A7P_IRQ_N,
++       A7P_PKT_N, A7P_BLK_BYTES };
++#define A7P_T0() u32 a7p_v0 = REG_VCOUNT
++#define A7P_ADD(i, v) do { if (WifiData) WifiData->arm7_prof[i] += (v); } while (0)
++#define A7P_LINES(i) A7P_ADD(i, (REG_VCOUNT + 263 - a7p_v0) % 263)
++
+ static int wifi_card_wlan_init(void);
+ 
+ #define ID_AR6002 (0x02000271)
+@@ -159,9 +169,12 @@ static const char *wifi_card_get_chip_str(void)
+ 
+ static int wifi_card_write_func_byte(u8 func, u32 addr, u8 val)
+ {
++    A7P_T0();
+     // Read register 0x02 (function enable) hibyte until it's ready
+     wifi_card_send_command(cmd52,
+             BIT(31) /* write flag */ | (func << 28) | addr << 9 | val);
++    A7P_ADD(A7P_CMD52_N, 1);
++    A7P_LINES(A7P_CMD52_L);
+     if (wlan_ctx.tmio.status & 4)
+         return -1;
+ 
+@@ -197,6 +210,7 @@ static int wifi_card_read_func1_32bit(u32 addr, void* buf, u32 len)
+ 
+ static int wifi_card_read_func1_block(u32 addr, void* buf, u32 len)
+ {
++    A7P_T0();
+     wifi_ndma_wait();
+     wifi_sdio_stop();
+ 
+@@ -210,6 +224,9 @@ static int wifi_card_read_func1_block(u32 addr, void* buf, u32 len)
+ 
+     wifi_sdio_stop();
+     wifi_ndma_wait();
++    A7P_ADD(A7P_BLK_N, 1);
++    A7P_ADD(A7P_BLK_BYTES, len);
++    A7P_LINES(A7P_BLK_L);
+ 
+     if (wlan_ctx.tmio.status & 4)
+         return -1;
+@@ -248,8 +265,11 @@ static int wifi_card_write_func1_block(u32 addr, void* buf, u32 len)
+ 
+ u8 wifi_card_read_func_byte(u8 func, u32 addr)
+ {
++    A7P_T0();
+     // Read register 0x02 (function enable) hibyte until it's ready
+     wifi_card_send_command(cmd52, (func << 28) | (addr & 0x1FFFF) << 9);
++    A7P_ADD(A7P_CMD52_N, 1);
++    A7P_LINES(A7P_CMD52_L);
+     if (wlan_ctx.tmio.status & 4)
+         return 0xFF;
+ 
+@@ -596,7 +616,11 @@ static void data_handle_pkt(u8 *pkt_data, u32 len)
+         WLOG_FLUSH();
+ #endif
+ 
+-        if (Wifi_TWL_RxAddPacketToQueue(pkt_data, len) != 0)
++        A7P_T0();
++        int q = Wifi_TWL_RxAddPacketToQueue(pkt_data, len);
++        A7P_ADD(A7P_PKT_N, 1);
++        A7P_LINES(A7P_QUEUE_L);
++        if (q != 0)
+         {
+             WLOG_PUTS("T: RX queue full\n");
+             WLOG_FLUSH();
+@@ -1092,10 +1116,15 @@ static void wifi_card_process_pkts(void)
+ 
+ static void wifi_card_irq(void)
+ {
+-    Wifi_RandomAddEntropy(REG_VCOUNT);
++    u32 v0 = REG_VCOUNT;
++    Wifi_RandomAddEntropy(v0);
+ 
++    A7P_ADD(A7P_IRQ_N, 1);
+     wifi_card_process_pkts();
+ 
++    if (WifiData)
++        WifiData->arm7_busy_lines += (REG_VCOUNT + 263 - v0) % 263;
++
+     //wmi_tick(); // TODO
+ }
+ 
+diff --git a/source/arm7/twl/update.twl.c b/source/arm7/twl/update.twl.c
+index ca720cf..828f174 100644
+--- a/source/arm7/twl/update.twl.c
++++ b/source/arm7/twl/update.twl.c
+@@ -18,7 +18,18 @@
+ #include "arm7/twl/ath/wmi.h"
+ #include "common/mac_addresses.h"
+ 
++static void Wifi_TWL_Update_(void);
++
++// dspico-romm: measures the ARM7 time spent here (see arm7_busy_lines).
+ void Wifi_TWL_Update(void)
++{
++    u32 v0 = REG_VCOUNT;
++    Wifi_TWL_Update_();
++    if (WifiData)
++        WifiData->arm7_busy_lines += (REG_VCOUNT + 263 - v0) % 263;
++}
++
++static void Wifi_TWL_Update_(void)
+ {
+     if (WifiData == NULL)
+         return;
+diff --git a/source/arm9/wifi_arm9.c b/source/arm9/wifi_arm9.c
+index 0fce1d1..936504c 100644
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -322,6 +322,19 @@ TWL_CODE static void Wifi_TWL_Update(void)
+     }
+ }
+ 
++// dspico-romm: ARM7 Wi-Fi handler time in scanlines (63.56 us each).
++u32 Wifi_Arm7BusyLines(void)
++{
++    return WifiData ? WifiData->arm7_busy_lines : 0;
++}
++
++// dspico-romm: ARM7 breakdown counters (see arm7/twl/card.twl.c A7P_*).
++void Wifi_Arm7Prof(u32 out[8])
++{
++    for (int i = 0; i < 8; i++)
++        out[i] = WifiData ? WifiData->arm7_prof[i] : 0;
++}
++
+ void Wifi_Update(void)
+ {
+     if (!WifiData)
+diff --git a/source/common/wifi_shared.h b/source/common/wifi_shared.h
+index f9d1b76..a7980f6 100644
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -278,6 +278,12 @@ typedef struct WIFI_MAINSTRUCT
+     // End
+     // ---
+ 
++    // dspico-romm: time the ARM7 spends in the DSi Wi-Fi handlers (card IRQ
++    // and the 1 ms update tick), in LCD scanlines (63.56 us each).
++    u32 arm7_busy_lines;
++    // Breakdown (counts and scanlines): see A7P_* in arm7/twl/card.twl.c
++    u32 arm7_prof[8];
++
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+ 

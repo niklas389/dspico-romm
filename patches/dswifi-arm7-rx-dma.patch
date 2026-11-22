@@ -1,0 +1,365 @@
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -284,9 +284,47 @@
+     // Breakdown (counts and scanlines): see A7P_* in arm7/twl/card.twl.c
+     u32 arm7_prof[8];
+ 
++    // dspico-romm: receive path options set by the ARM9 (DSPICO_A7_OPT_*),
++    // used by the ARM7 only while connected, and facts the ARM7 reports
++    // about the Wi-Fi firmware and its receive path (DSPICO_A7I_*).
++    u32 a7_opts;
++    u32 a7_info[16];
++
+     u8 padding[CACHE_LINE_SIZE]; // See comment at top of struct
+ } Wifi_MainStruct;
+ 
++// dspico-romm: ARM7 receive options (WifiData->a7_opts)
++#define DSPICO_A7_OPT_REGS53   1 // Status + lookahead registers in one CMD53
++#define DSPICO_A7_OPT_DMA_RING 2 // SDIO DMA straight into the RX ring
++
++// dspico-romm: WifiData->a7_info[] indices
++enum {
++    DSPICO_A7I_BMI_VER,      // BMI target version
++    DSPICO_A7I_HTC_LEN,      // HTC_MSG_READY payload length
++    DSPICO_A7I_HTC_W0,       // HTC_MSG_READY payload bytes 0..7
++    DSPICO_A7I_HTC_W1,
++    DSPICO_A7I_WMI_LEN,      // WMI_READY_EVENT payload length
++    DSPICO_A7I_WMI_W0,       // WMI_READY_EVENT payload bytes 0..15
++    DSPICO_A7I_WMI_W1,
++    DSPICO_A7I_WMI_W2,
++    DSPICO_A7I_WMI_W3,
++    DSPICO_A7I_SDIO,         // clk_cnt | bus_width << 8 | block_size << 16
++    DSPICO_A7I_REGS53,       // Combined register reads (CMD53)
++    DSPICO_A7I_RING_DMA,     // Packets DMAed straight into the ring
++    DSPICO_A7I_LA_TRAILER,   // Lookahead taken from a packet trailer
++    DSPICO_A7I_LA_REGS,      // Lookahead taken from the registers
++    DSPICO_A7I_RING_FULL,    // DMA path: ring full, packet dropped
++    DSPICO_A7I_EAPOL,        // DMA path: EAPOL frames also handled on the ARM7
++};
++
++// dspico-romm: DSi RX ring entry whose data was written by SDIO DMA. The
++// size word then holds: bit 30 set, bits 16..27 the entry length in cache
++// lines (from the size word to the next entry), bits 0..15 the data size.
++// The data starts DSPICO_RX_DMA_DATA bytes after the size word.
++#define DSPICO_RX_DMA_FLAG   0x40000000u
++#define DSPICO_RX_DMA_BLOCK  32  // DMA destination, from the entry start
++#define DSPICO_RX_DMA_DATA   (DSPICO_RX_DMA_BLOCK + 6 - 4) // HTC header 6 B
++
+ // dspico-romm: DSi RX ring entries are padded to whole cache lines.
+ static inline u32 round_up_line(u32 value)
+ {
+--- a/source/arm9/wifi_arm9.c
++++ b/source/arm9/wifi_arm9.c
+@@ -265,10 +265,24 @@
+         u32 entry_idx = read_idx;
+         read_idx += sizeof(uint32_t);
+ 
++        // dspico-romm: entry written by SDIO DMA (see DSPICO_RX_DMA_FLAG):
++        // the data starts later and the entry length is stored explicitly.
++        u32 data_ofs = 0, entry_end;
++        if (size & DSPICO_RX_DMA_FLAG)
++        {
++            entry_end = entry_idx + ((size >> 16) & 0xFFF) * 32;
++            size &= 0xFFFF;
++            data_ofs = DSPICO_RX_DMA_DATA;
++        }
++        else
++        {
++            entry_end = round_up_line(read_idx + size); // Padded to a line
++        }
++
+         int slot = (rxq_head + rxq_count) % WIFI_RXQ_SLOTS;
+         rxq[slot].start = entry_idx;
+-        rxq[slot].end = round_up_line(read_idx + size);
+-        rxq[slot].next = rxq[slot].end; // The ARM7 pads entries to a line
++        rxq[slot].end = entry_end;
++        rxq[slot].next = rxq[slot].end;
+         rxq[slot].done = false;
+         rxq[slot].taken = false;
+         rxq[slot].t_ms = sys_now();
+@@ -286,7 +300,7 @@
+             if (WifiData->curLibraryMode == DSWIFI_INTERNET)
+             {
+                 if (wifi_netif_is_up())
+-                    Wifi_SendPacketToLwip((u8*)(rxbufData + read_idx), size);
++                    Wifi_SendPacketToLwip((u8*)(rxbufData + read_idx + data_ofs), size);
+             }
+         }
+ #endif
+@@ -328,6 +342,19 @@
+     return WifiData ? WifiData->arm7_busy_lines : 0;
+ }
+ 
++// dspico-romm: ARM7 receive options (DSPICO_A7_OPT_*) and firmware facts.
++void Wifi_A7SetOpts(u32 opts)
++{
++    if (WifiData)
++        WifiData->a7_opts = opts;
++}
++
++void Wifi_A7Info(u32 out[16])
++{
++    for (int i = 0; i < 16; i++)
++        out[i] = WifiData ? WifiData->a7_info[i] : 0;
++}
++
+ // dspico-romm: ARM7 breakdown counters (see arm7/twl/card.twl.c A7P_*).
+ void Wifi_Arm7Prof(u32 out[8])
+ {
+--- a/source/arm7/twl/sdio.h
++++ b/source/arm7/twl/sdio.h
+@@ -208,6 +208,7 @@
+ 
+ void wifi_sdio_stop(void);
+ void wifi_sdio_setclk(u32 data);
++void wifi_sdio_prepare_read32(void); // dspico-romm
+ 
+ void wifi_sdio_enable_cardirq(bool en);
+ u16 wifi_sdio_get_cardirq_stat(void);
+--- a/source/arm7/twl/sdio.twl.c
++++ b/source/arm7/twl/sdio.twl.c
+@@ -43,6 +43,16 @@
+     wifi_sdio_write32(reg, val);
+ }
+ 
++// dspico-romm: 32-bit FIFO read mode for a byte-mode (single) CMD53 read.
++// wifi_sdio_send_command() only configures it for block transfers, so a
++// single read after a block write found the FIFO in write mode: no RX-ready,
++// the bytes stayed in the FIFO and corrupted the next packet read.
++void wifi_sdio_prepare_read32(void)
++{
++    wifi_sdio_write16(WIFI_SDIO_OFFS_DATA16_CNT, 0x0002);
++    wifi_sdio_write16(WIFI_SDIO_OFFS_IRQ32, 0xC02);
++}
++
+ void wifi_sdio_controller_init(void)
+ {
+     wifi_sdio_mask16(WIFI_SDIO_OFFS_IRQ32, 0x0800, 0x0000);
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -330,6 +330,42 @@
+     return wifi_card_alignedbuf_small[0];
+ }
+ 
++// dspico-romm: HOST_INT_STATUS (0x400) .. RX_LOOKAHEAD0 (0x408..0x40B) in one
++// byte-mode CMD53, like Linux's ath6kl reads its irq_proc_registers. The
++// controller block length must equal the byte count for one transfer.
++// out[0] = HOST/CPU/ERROR/COUNTER_INT_STATUS, out[1] = MBOX_FRAME,
++// RX_LOOKAHEAD_VALID, ..., out[2] = RX_LOOKAHEAD0. Returns false on errors.
++static bool wifi_card_read_irq_regs(u32 out[3])
++{
++    wifi_ndma_wait();
++    wifi_sdio_stop();
++    wifi_sdio_prepare_read32();
++
++    wlan_ctx.tmio.buffer = wifi_card_alignedbuf_small;
++    wlan_ctx.tmio.size = 12;
++    wlan_ctx.tmio.break_early = true;
++
++    u32 old_blocksize = wlan_ctx.tmio.block_size;
++    wlan_ctx.tmio.block_size = 12;
++    wifi_card_send_command_alt(cmd53_read_single,
++            (1u << 28) | (1 << 26) | (F1_HOST_INT_STATUS & 0x1FFFF) << 9 | 12);
++    wlan_ctx.tmio.block_size = old_blocksize;
++
++    if (wlan_ctx.tmio.status & 4)
++        return false;
++    out[0] = wifi_card_alignedbuf_small[0];
++    out[1] = wifi_card_alignedbuf_small[1];
++    out[2] = wifi_card_alignedbuf_small[2];
++    if (WifiData)
++        WifiData->a7_info[DSPICO_A7I_REGS53]++;
++    return true;
++}
++
++static bool a7_opt(u32 bit)
++{
++    return WifiData && (WifiData->a7_opts & bit);
++}
++
+ static void wifi_card_write_func1_u16(u32 addr, u16 val)
+ {
+     // Write from MSB to LSB
+@@ -750,8 +786,21 @@
+ 
+     if (readpkt_irq_mode)
+     {
+-        if (!mbox_has_lookahead &&
+-            !(wifi_card_read_func1_u8(F1_HOST_INT_STATUS) & 1)) // RX FIFO empty
++        if (!mbox_has_lookahead && a7_opt(DSPICO_A7_OPT_REGS53))
++        {
++            // One CMD53: is there data, and its lookahead (else 5 CMD52)
++            u32 regs[3];
++            if (!wifi_card_read_irq_regs(regs) || !(regs[0] & 1))
++                return 0; // RX FIFO empty
++            if ((regs[1] >> 8) & 1)
++            {
++                mbox_has_lookahead = true;
++                mbox_lookahead = regs[2];
++                WifiData->a7_info[DSPICO_A7I_LA_REGS]++;
++            }
++        }
++        else if (!mbox_has_lookahead &&
++                 !(wifi_card_read_func1_u8(F1_HOST_INT_STATUS) & 1)) // RX FIFO empty
+             return 0;
+     }
+     else
+@@ -812,6 +861,37 @@
+         return 0;
+     }
+ 
++    // dspico-romm: data packets straight into the ARM9 RX ring by SDIO DMA
++    // (no copy). The entry is reserved first with size 0, so the ARM9 stops
++    // there until the size word is written after the transfer.
++    u32 ring_idx = 0;
++    bool in_ring = false;
++    if (readpkt_irq_mode && a7_opt(DSPICO_A7_OPT_DMA_RING) &&
++        pkt_type >= 2 && pkt_type <= 5)
++    {
++        u32 span = round_up_line(DSPICO_RX_DMA_BLOCK + full_len);
++        int oldIME = enterCriticalSection();
++        int idx = Wifi_RxBufferAllocBuffer(span + sizeof(u32));
++        if (idx >= 0)
++        {
++            u8 *ring = (u8 *)WifiData->rxbufData;
++            write_u32(ring + idx, 0);         // Not ready yet
++            write_u32(ring + idx + span, 0);  // End marker after it
++            WifiData->rxbufWrite = idx + span;
++            ring_idx = idx;
++            in_ring = true;
++        }
++        else
++        {
++            // Read into the mailbox buffer below; the queue copy then counts
++            // the loss (ring full)
++            WifiData->a7_info[DSPICO_A7I_RING_FULL]++;
++        }
++        leaveCriticalSection(oldIME);
++        if (in_ring)
++            read_buffer = (u8 *)WifiData->rxbufData + ring_idx + DSPICO_RX_DMA_BLOCK;
++    }
++
+     u16 actual_len = wifi_card_mbox0_readbytes(read_buffer, MBOX_TMPBUF_SIZE, full_len);
+ 
+     if (!actual_len)
+@@ -848,6 +928,26 @@
+     {
+         wmi_handle_pkt(pkt_cmd, pkt_data, len_pkt - 2, ack_len);
+     }
++    else if (in_ring)
++    {
++        // EAPOL (e.g. group key updates) is handled on the ARM7 as before;
++        // the ARM9 drops the frame (unknown ethertype for lwIP).
++        u8 *d = pkt_data - 2;
++        if (len_pkt >= 24 && d[22] == 0x88 && d[23] == 0x8E)
++        {
++            memcpy(mbox_buffer + 6, d, len_pkt);
++            data_handle_pkt(mbox_buffer + 6, len_pkt);
++            WifiData->a7_info[DSPICO_A7I_EAPOL]++;
++        }
++        u32 span = round_up_line(DSPICO_RX_DMA_BLOCK + full_len);
++        u8 *ring = (u8 *)WifiData->rxbufData;
++        write_u32(ring + ring_idx, DSPICO_RX_DMA_FLAG | (span / 32) << 16 | len_pkt);
++        WifiData->stats[WSTAT_RXQUEUEDPACKETS]++;
++        WifiData->stats[WSTAT_RXQUEUEDBYTES] += len_pkt;
++        WifiData->a7_info[DSPICO_A7I_RING_DMA]++;
++        A7P_ADD(A7P_PKT_N, 1);
++        Wifi_CallSyncHandler();
++    }
+     else if (pkt_type == 2 || pkt_type == 3 || pkt_type == 4 || pkt_type == 5) // one of my routers sends 0x04 for some reason
+     {
+         data_handle_pkt(pkt_data - 2, len_pkt);
+@@ -884,6 +984,8 @@
+             {
+                 mbox_has_lookahead = true;
+                 mbox_lookahead = getle32(&ack_data[ack_idx+1]);
++                if (WifiData)
++                    WifiData->a7_info[DSPICO_A7I_LA_TRAILER]++;
+ 
+                 //hexdump(&ack_data[ack_idx], 6);
+             }
+@@ -1161,8 +1263,24 @@
+     // dspico-romm: read the four status bytes with one CMD53 and write back
+     // only the non-zero ones (same values and order as upstream's 32-bit
+     // write, which always cost four CMD52).
+-    u32 int_sts = DSPICO_A7_CMD53 ? wifi_card_read_func1_u32_fast(F1_HOST_INT_STATUS)
++    u32 regs[3];
++    u32 int_sts;
++    if (a7_opt(DSPICO_A7_OPT_REGS53) && wifi_card_read_irq_regs(regs))
++    {
++        // Lookahead for the first packet comes with the status
++        int_sts = regs[0];
++        if ((int_sts & 1) && (regs[1] >> 8) & 1) // RX data, RX_LOOKAHEAD_VALID[0]
++        {
++            mbox_has_lookahead = true;
++            mbox_lookahead = regs[2];
++            WifiData->a7_info[DSPICO_A7I_LA_REGS]++;
++        }
++    }
++    else
++    {
++        int_sts = DSPICO_A7_CMD53 ? wifi_card_read_func1_u32_fast(F1_HOST_INT_STATUS)
+                                   : wifi_card_read_func1_u32(F1_HOST_INT_STATUS);
++    }
+     for (int b = 3; b >= 0; b--)
+     {
+         u8 v = (int_sts >> (8 * b)) & 0xFF;
+@@ -1431,6 +1549,13 @@
+ 
+     // Begin talking to bootloader
+     u32 bmi_ver = wifi_card_bmi_get_version();
++    if (WifiData) // dspico-romm: for the log
++    {
++        WifiData->a7_info[DSPICO_A7I_BMI_VER] = bmi_ver;
++        WifiData->a7_info[DSPICO_A7I_SDIO] = wlan_ctx.tmio.clk_cnt |
++                                             (u32)wlan_ctx.tmio.bus_width << 8 |
++                                             (u32)wlan_ctx.tmio.block_size << 16;
++    }
+     WLOG_PRINTF("T: BMI version: 0x%x\n", (unsigned int)bmi_ver);
+     WLOG_FLUSH();
+ 
+--- a/source/arm7/twl/ath/htc.twl.c
++++ b/source/arm7/twl/ath/htc.twl.c
+@@ -9,6 +9,8 @@
+ #include "arm7/twl/ath/mbox.h"
+ #include "arm7/twl/ath/wmi.h"
+ #include "arm7/twl/card.h"
++#include "arm7/twl/utils.h"
++#include "arm7/ipc.h"
+ 
+ static u8 htc_buffer[0x80];
+ 
+@@ -24,6 +26,16 @@
+     {
+         case HTC_MSG_READY:
+         {
++            // dspico-romm: credit count/size, max endpoints and, from HTC 2.1
++            // on, version and messages per bundle (for the log)
++            if (WifiData)
++            {
++                u8 b[8] = { 0 };
++                memcpy(b, pkt_data, len < 8 ? len : 8);
++                WifiData->a7_info[DSPICO_A7I_HTC_LEN] = len;
++                WifiData->a7_info[DSPICO_A7I_HTC_W0] = getle32(b);
++                WifiData->a7_info[DSPICO_A7I_HTC_W1] = getle32(b + 4);
++            }
+             WLOG_PRINTF("T: HTC_MSG_READY (%u B) 0x%x\n", (unsigned int)len,
+                         (unsigned int)ack_len);
+             WLOG_FLUSH();
+--- a/source/arm7/twl/ath/wmi.twl.c
++++ b/source/arm7/twl/ath/wmi.twl.c
+@@ -322,6 +322,14 @@
+     {
+         case WMI_READY_EVENT:
+         {
++            if (WifiData) // dspico-romm: for the log
++            {
++                u8 b[16] = { 0 };
++                memcpy(b, pkt_data, len < 16 ? len : 16);
++                WifiData->a7_info[DSPICO_A7I_WMI_LEN] = len;
++                for (int i = 0; i < 4; i++)
++                    WifiData->a7_info[DSPICO_A7I_WMI_W0 + i] = getle32(b + 4 * i);
++            }
+             memcpy((void *)WifiData->MacAddr, pkt_data, sizeof(WifiData->MacAddr));
+             WLOG_PRINTF("T: READY_EVENT, %x\nT: MAC: %x:%x:%x:%x:%x:%x\n",
+                         pkt_data[6], pkt_data[0], pkt_data[1], pkt_data[2],

@@ -31,6 +31,7 @@ typedef struct
     uint64_t wire_bytes;    // Bytes received on the wire (CURLINFO_SIZE_DOWNLOAD_T)
     const char *tls_version;
     const char *tls_cipher;
+    bool zero_copy_tls;     // dl.c: body decrypted by tlsrx (no Mbed TLS copies)
 } net_result_t;
 
 // Called during downloads. Return false to abort the transfer.
@@ -40,6 +41,11 @@ typedef bool (*net_progress_fn)(void *ctx, uint64_t now, uint64_t total,
 // Loads the CA file (romm/ca.pem), initialises PSA crypto and libcurl.
 bool net_init(const config_t *cfg);
 void net_cleanup(void);
+
+// Configuration and CA bundle (NUL-terminated PEM, NULL if none) given to
+// net_init(), for the curl-free download client (dl.h).
+const config_t *net_config(void);
+const char *net_ca_pem(size_t *len);
 
 // Milliseconds since boot (lwIP 1 ms timer, wraps after ~49 days).
 uint32_t net_now_ms(void);
@@ -51,9 +57,66 @@ bool net_get(const char *path, bool auth, buf_t *out, net_result_t *res);
 bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
                    net_result_t *res);
 
+// Multipart upload of one file (form field `field`) with the Bearer token,
+// method "POST" or "PUT"; response into memory.
+bool net_send_file(const char *method, const char *path, const char *field,
+                   const char *filename, const void *data, size_t len, buf_t *out,
+                   net_result_t *res);
+
 // GET <url><path> streaming the body into fp (fp may be NULL to discard).
 bool net_download(const char *path, FILE *fp, net_progress_fn cb, void *ctx,
                   net_result_t *res);
+
+typedef struct
+{
+    int conns;
+    bool ok;
+    long status;          // HTTP status of the first connection (expect 206)
+    uint64_t bytes;       // Body bytes received over all connections
+    uint32_t total_ms;    // Wall time including connection setup
+    uint32_t setup_ms;    // Until the slowest connection got its first byte
+    const char *tls_cipher;
+    char error[128];
+} net_par_result_t;
+
+// Downloads bytes [0, length) of <base_url><path> over `conns` parallel
+// connections (HTTP Range requests), discarding the data. base_url NULL means
+// the configured URL. Each connection is new, so TLS setup is included.
+bool net_download_parallel(const char *base_url, const char *path,
+                           uint64_t length, int conns, net_progress_fn cb,
+                           void *ctx, net_par_result_t *out);
+
+// Like net_download, but only bytes [first, last] (HTTP Range) over the
+// shared keep-alive connection.
+bool net_download_range(const char *path, uint64_t first, uint64_t last, FILE *fp,
+                        net_progress_fn cb, void *ctx, net_result_t *res);
+
+// Bytes [first, last] (HTTP Range) into memory.
+bool net_get_range(const char *path, uint64_t first, uint64_t last, buf_t *out,
+                   net_result_t *res);
+
+// Same, but the body goes through a background SD writer (see sdwriter.h).
+struct sdwriter;
+bool net_download_range_async(const char *path, uint64_t first, uint64_t last,
+                              struct sdwriter *sdw, net_progress_fn cb, void *ctx,
+                              net_result_t *res);
+
+// DSWiFi ARM7 -> ARM9 queue counters (cumulative since Wi-Fi init).
+typedef struct
+{
+    uint32_t rx_queued;   // Packets the ARM7 put into the ARM9 ring buffer
+    uint32_t rx_lost;     // Packets dropped because the ring buffer was full
+    uint32_t tx_rejected; // Outgoing packets rejected (TX buffer full)
+} net_wifi_stats_t;
+
+void net_wifi_stats(net_wifi_stats_t *out);
+
+// Association state as text (DSWiFi ASSOCSTATUS_STRINGS).
+const char *net_wifi_status(void);
+
+// Reconnects (WFC settings) if the access point association was lost.
+// Waits up to 20 s. Returns true when associated.
+bool net_wifi_ensure(void);
 
 // URL-encodes a path segment. The returned string must be freed with free().
 char *net_escape(const char *s);

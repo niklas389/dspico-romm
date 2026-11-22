@@ -49,6 +49,195 @@ the DSi takes to parse it.
 Save your WPA2 network in **DSi System Settings → Internet → Advanced Setup**
 (connections 4–6). Connections 1–3 only support WEP or open networks.
 
+## Speed test
+
+Select a ROM of at least 8 MB and press **Y**. The suite measures:
+
+- the round-trip time to the server (via TCP connect),
+- the CPU speed of ChaCha20-Poly1305 and AES-128-GCM (the TLS cost),
+- the SD write speed,
+- download speed with 1, 2 and 4 parallel connections (HTTP Range requests,
+  8 MB each, data discarded),
+- optionally plain HTTP, if `http_url=` is set in `config.ini`.
+
+- download speed with the body written to the SD card (like a real download),
+- for every test, how many packets the ARM7 had to drop because the
+  ARM7 -> ARM9 ring buffer was full ("lost").
+
+There are two builds:
+
+| ROM | DSWiFi | Log file |
+| --- | --- | --- |
+| `romm-poc.nds` | stock (5840 B TCP window, 12 KiB RX ring, MTU 1300) | `poc-stock-4x1460-rx12.log` |
+| `romm-poc-rx128.nds` | patched: 46720 B window, 128 KiB RX ring, zero-copy RX from the ring (`zerocopy=`), MTU from `config.ini` (default 1500); SD driver on the ARM9 | `poc-32x1460-rx128.log` |
+
+Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
+
+| Version | Network only | Download to SD | Change |
+| --- | --- | --- | --- |
+| stock | 347 | 250 | |
+| 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
+| 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
+| 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.43 | – | – | fix: Wi-Fi waits yield to the lwIP thread (swiWaitForVBlank halts all cothreads: since v0.40 DHCP never finished; net_wifi_ensure reconnects had the same flaw) |
+| 0.44 | – | – | Wi-Fi connect diagnostics: ARM7 counters per stage (card init, SCFG, firmware, channel list, scans, BSS info/SNR, connect/disconnect reason) and the AP list, logged after every attempt |
+| 0.45 | – | – | Wi-Fi warm-start fix attempt: the firmware sometimes never sent HTC/WMI ready (v0.44 diagnostics: ready 0, no channel list, no scan). ARM7 init watchdog: polls card interrupts after 100 ms, re-initializes the card after 3 s (up to 3x); bounded firmware-ready wait; a disable request during init now reaches the card (retry 3 was a no-op) |
+| 0.46 | – | – | v0.45 result: polling found pending card interrupts on failed warm starts, but no HTC/WMI ready; 3 BMI-level re-inits did not help. Adds init packet/status diagnostics and an SDIO-level reset (CCCR I/O abort RES) from the 2nd watchdog re-init on; logs a7cmd53/a7dma |
+| 0.47 | – | – | DSi-menu-style interface: bitmap UI on both screens (gfx.c, ui.c, DejaVu-based Latin font), start-up steps, platform and game icon strips (L/R letter jump), game details, download/unpack progress, save sync screen, tools menu (SELECT: log, speed tests in the text console); placeholders instead of covers |
+| 0.48 | – | – | UI fixes: scrollable game details (▲▼, L/R page), letter bar highlight behind the letters, game list and save list updated in a background thread (strip shows the SD index at once; "updating"/"offline" in the title), size shown once |
+| 0.49 | – | – | Status bar: Wi-Fi icon (RSSI value logged for calibration) and clock refreshed every second; update/offline shown as an icon; downloads recorded in romm/library.txt and file names compared case-insensitively (unpacked games recognized) |
+| 0.50 | – | – | On-SD detection: fallback match ignoring punctuation, case and accents; log lists ROM files in the folder without an exact RomM match |
+| 0.51 | – | – | Cover art: background download nearest the selection (only while it rests, paused for other network use), PNG/JPEG decode (stb_image), SD cache in display format; A opens the details page for every game |
+| 0.52 | – | – | Battery icon in the status bar (4 segments from the DSi level 0..15, green while charging, red when nearly empty; read every 10 s) |
+| 0.53 | – | – | Artwork: 2D box art first (fallback cover), whole picture with aspect ratio (cache format v2, re-downloaded once); top cover shown at once on selection; tiles near the selection loaded every frame; cover result kept when a key interrupts the download; details page fetches its cover if missing; faster scrolling (animation, key repeat) |
+| 0.54 | – | – | Strip: 2D box art; top screen: cover (as in 0.51). Cover cache per platform, read with one folder scan (no per-game file lookups); images load only when the strip stands still; downloads only after 0.5 s of rest |
+| 0.55 | – | – | Artwork speed: streaming PNG decoder (zlib, row-wise scaling, yields every ~4 ms), TJpgDec for JPEG at 1/2..1/8 scale, stb_image only as fallback; per-image fetch/decode timing in the log; art=box2d/cover setting; "Download all artwork" in the tools menu |
+| 0.56 | – | – | Measured (0.55, DSi): box2d 705x700 PNG 2.7 s decode + 0.8 s fetch, small cover 162x216 0.19 s + 0.1 s. Decoding now converts/scales only sampled rows and columns (max 3x3 per output pixel), zlib state in ITCM, log splits inflate/rows time; START asks before quitting; Wi-Fi bar thresholds from RSSI 202 at -54 dBm |
+| 0.57 | – | – | Dark mode (tools menu, saved in romm/ui.txt); X on the platform screen syncs all saves of the visible platforms (safe directions only, summary with conflicts) |
+| 0.58 | – | – | Strip art: nearly square images (aspect up to 5:4, e.g. DS boxes ~1.12:1) are cropped to fill the 64x64 tile; others stay whole. New strip cache names (.tl2/.tc2), so strip images load once more |
+| 0.59 | – | – | Own 32x32 app icon (icon.gif with transparency index 0; a BMP lost the transparency in ndstool); help texts that are too wide drop the double spaces; battery segments with padding on both sides; screens stay black until the theme is loaded (no white flash in dark mode) |
+| 0.60 | – | – | Strip stutter: the save status (MD5 of the save file) is computed by the background thread in yielding 16 KB pieces instead of on the UI thread; artwork is no longer marked "none" after a network error (only 404 / not decodable); "Download all artwork" also retries games marked "none" |
+| 0.61 | – | – | Platform icons from RomM (/assets/platforms/<slug>.ico, PNG inside, fetched once at start, cached); artwork transparency kept in the cache (works in both themes) |
+| 0.62 | – | – | Save not found for ROMs whose file name differs in punctuation (e.g. "(USA, Europe)" vs RomM "(USA Europe)"): download_local now has the tolerant fallback (cached folder listing), used by the save sync too; platform icons on a rounded panel; cover/summary loads wait until the strip animation has ended (no stop-and-jump) |
+| 0.42 | – | – | fix: no Wifi_Deinit (crashes with lwIP: v0.40/0.41 crashed on every exit, logs stayed 0 B); Wi-Fi module power-cycle via SCFG_WL before the card init (`wifireset`), retry 3 = disable + re-init; log synced every 8 lines |
+| 0.40 | – | – | Wi-Fi: own connect timeout, up to 3 attempts with a full DSWiFi shutdown in between, clean shutdown on every exit; save sync also automatic in the detail view; RomM content_hash confirmed as MD5 |
+| 0.38 | – | – | save sync with RomM (automatic at start, SELECT in the detail view, conflicts asked); HW-AES ruled out (GHASH alone 3.0 MB/s on the ARM9 < ChaCha20-Poly1305 3.4 MB/s, engine conventions unmatched) |
+| 0.37 | – | – | speed test: DSi AES engine feasibility (register conventions found against Mbed TLS, 256 KB AES-CTR through the ARM7 by CPU and NDMA, verified) and GHASH with an 8-bit table on the ARM9 |
+| 0.36 | – | – | decryption through a 1 KiB aligned DTCM buffer when TLS data is misaligned (v0.35 profile: ~60 % of ChaCha20 time in the byte path); v0.35: dl net **1259** KB/s, ARM7 ~475 us per packet |
+| 0.35 | – | – | fix: 32-bit FIFO read mode for the combined CMD53 status read (after a block write the bytes stayed in the FIFO and corrupted the next packet: v0.34 lost DHCP); options enabled only after DHCP, switched off automatically if the first request fails. Firmware: HTC 2.0 without bundling |
+| 0.34 | – | – | ARM7 RX: status + lookahead in one CMD53 (`a7cmd53`), SDIO DMA straight into the RX ring (`a7dma`), Wi-Fi firmware info in the log; speed test rows `dl nodec` (TLS records counted, not decrypted) and ChaCha20 alignment |
+| 0.28 | – | – | local ROM index, detail view, hideable platforms |
+| 0.27 | – | 951 (110 MB ROM, 1 request) | ROM downloads into `/roms/<platform>/` (download.c) |
+| 0.26 | 1104 | **1055** (raw DMA writer, verified; DLDI 890) | interrupt-driven DSpico DMA SD writer (`dl SDraw`), ARM7 safety poll removed |
+| 0.25 | – | – | raw sequential writes 3079 (CPU) / 2976 (DMA) KB/s, verified; Wi-Fi died during the downloads (ARM7 4 ms poll) |
+| 0.24 | 966 | 918 (961 ARM7 prio) | raw DSpico writes verified (CPU and DMA) but 150 KB/s single-sector; one Wi-Fi connect hang |
+| 0.23 | **1144** | 892 (932 with ARM7 bus priority) | ARM7 burst copy: ring copy 375 -> 113 us per packet |
+| 0.22 | **935** | **901** | safe variant: no status polling loop (CMD52 30 -> 3 per packet); the CMD53 variant did not connect |
+| 0.21 | – | – | Wi-Fi never connected (break_early restore changed the firmware upload) |
+| 0.20 | 651 | 701 | ARM7 per packet: ~1.1 ms busy = 30 CMD52 (~840 us) + block 250 us + copy 350 us |
+| 0.19 | 703 (zc TLS) / 729 (Mbed TLS) | 801 / 795 | zero-copy TLS records (tlsrx.c), Wi-Fi reconnect, watchdog limited to idle sockets |
+| 0.18 | 739 dl | 791 dl | Wi-Fi link lost during the test (no packets from the ARM7, DNS failed afterwards) |
+| 0.17 | 754 dl / 735 curl | **835** dl / 700 curl | yield after each TLS record (+15 % to SD vs 724 without) |
+| 0.16 | 639 dl / 792 curl | 793 dl / 687 curl | 93 KB scaled window tested: slower in all 4 tests (439-630), dropped |
+| 0.15 | 651 (dl; curl 462) | 808 (dl; curl 493) | zero-copy stall fixed (mailbox migration), ARM7 load measurement |
+| 0.14 | 680 (dl) | 705 (dl) | OpenSSL ARMv4 ChaCha20/Poly1305 assembly; curl-free download client (`dl.c`) |
+| 0.13 | 912 | 702 | same as 0.12, no stall in this run; copy mode: 843 / 576 |
+| 0.12 | – (stalled) | 699 | zero-copy RX (stalled once, see 0.13), fused MAC/decrypt pass |
+| 0.11 | 805 | 602 | MTU 1500 (553 at MTU 1300 in the same run), cached RX ring reads, ChaCha20 without memcpy |
+
+The patched builds also use a matching ARM7 core, because the RX buffer is
+shared between both CPUs (see `tools/build_dswifi.sh` and `patches/`).
+
+## Controls
+
+![Screens](docs/ui-screens.png)
+![Dark mode](docs/ui-screens-dark.png)
+
+| Screen | Buttons |
+| --- | --- |
+| Platforms | ◀ ▶ select, L/R jump 4, A open, X sync all saves (visible platforms; conflicts stay for the game screen), Y show/hide platforms, SELECT tools, START quit (asks first) |
+| Games | ◀ ▶ select (hold to scroll), L/R previous/next letter, A details (download there), Y save sync, X re-scan the platform, B back, SELECT tools, START quit |
+| Save sync | L keep the DSi save (upload), R keep the RomM save (download), B back |
+| Tools (SELECT) | Download all artwork, dark mode on/off (saved in `romm/ui.txt`), show log, speed test, unzip CPU test (text console) |
+
+Artwork comes from RomM (PNG or JPEG). The strip shows the 2D box art
+(ScreenScraper `box2d`, which RomM stores next to the cover when `box2d` is in
+`scan.media`, the default), else the cover. The top screen shows the cover
+(`path_cover_small`, filling 90x120), else the box art. The cache is one folder
+per platform, `romm/covers/<platform id>/` (`<rom id>.tl2` strip image, `.tp` top
+image, `.tl2n`/`.tpn` = no artwork), read once when the platform opens. Missing
+images are downloaded in the background only while the selection rests for
+0.5 s: first the selected game's cover, then strip images nearest to it.
+Decoding: PNG with an own streaming decoder (zlib inflate row by row, each row
+scaled down at once, no full-size buffer), baseline JPEG with TJpgDec at 1/2 to
+1/8 size, other files with stb_image. PNG and JPEG decoding yields to the UI
+every ~4 ms. Each image logs its size, fetch and decode time (`[Cover]`).
+`art=cover` in config.ini uses the small cover in the strip instead of the box
+art (much smaller files). Tools (SELECT) > "Download all artwork" loads every
+missing image of the platform in one go.
+Platform icons come from RomM's web frontend (`/assets/platforms/<slug>.ico`,
+the PNG inside; SVG-only icons can't be decoded and keep the placeholder),
+fetched once at start and cached in `romm/covers/platforms/`. Transparent parts
+of artwork stay transparent in the cache, so it fits both themes.
+Older caches (`romm/covers/*.cov`, `*.cv2`, `*.none`, `*.nn2`) are no longer
+used and can be deleted. Games without a
+cover keep the placeholder (initials on a colour).
+
+## Downloading ROMs
+
+Pick a platform and a ROM, then press A. The ROM is saved to
+`<SD>/roms/<folder>/<file name>`; the folder comes from the RomM platform:
+
+| RomM platform | Folder |
+| --- | --- |
+| `nds` | `roms/nds` |
+| `nintendo-dsi` | `roms/dsi` |
+| `gba` | `roms/gba` |
+| others | RomM's folder name for the platform |
+
+The download goes to `<file name>.part` first and is renamed when it is
+complete; an interrupted transfer resumes with HTTP Range requests (up to 5
+attempts). On a DSpico the file is written with interrupt-driven DMA
+(`sdraw=1` in `config.ini`, the default); otherwise through the DLDI driver.
+B cancels. Y in the ROM menu runs the speed test.
+
+### Zip archives
+
+RomM can't convert a single-ROM `.zip` (`format=nds` returns "can't be served
+as nds"), so archives are unpacked on the console: the `.zip` is downloaded
+into the library folder, the ROM inside (the largest `.nds`/`.dsi`/`.srl`,
+`.gba` or `.gb`/`.gbc`, by folder) is inflated to `<zip name>.<rom ext>`, its
+CRC-32 is checked, and the archive is deleted. The ROM keeps the archive's
+name, so save files match the other clients' (which keep the `.zip`).
+Stored and deflate entries and ZIP64 are supported; 7z/rar are not. If
+unpacking is cancelled or fails for another reason than corrupt data, the
+archive stays on the SD card and the next A unpacks it without downloading.
+The log line `read / inflate / crc / SD wait` shows where the time goes.
+On a DSpico the archive is read with interrupt-driven DMA reads (4 × 64 KB
+read-ahead, queued with the writes in the same engine, `sdraw.c`), the
+inflate state (zlib's decoding tables) is allocated in ITCM and the CRC-32
+(slicing-by-4) runs from ITCM with its tables. X in the ROM detail view runs
+a CPU test of these on the first 4 MB of a ROM on the SD card.
+
+Before downloading, the app checks that the archive and the unpacked ROM fit
+on the SD card at the same time. The ROM size comes from the archive's
+central directory, fetched with one Range request for the last ~64 KB.
+
+## Save sync
+
+Pico Launcher keeps a game's save next to the ROM (`<rom name>.sav`). The
+app syncs these with RomM's save API (RomM 5.5, device tracking), in the
+slot set by `save_slot` in `config.ini` (default `autosave`):
+
+- at start, for every ROM on the SD card whose save changed on one side only
+  (games with a conflict are listed and left alone);
+- in the ROM detail view, whenever it is shown (also right after a ROM
+  download): a save that changed on one side only is synced automatically
+  (`Save: uploaded / downloaded`); otherwise the line shows `Save: in sync /
+  CONFLICT`. SELECT opens the save screen; on a conflict (or to force a
+  direction) L uploads the DSi save, R downloads the RomM save.
+
+Per ROM the app compares the local save's MD5, the newest server save of the
+slot (its `content_hash` and whether RomM marks it current for this device),
+and the state recorded at the last sync (`romm/saves/<rom id>.txt`). Before a
+local save is replaced, it is copied to `romm/save-backup/`. A DeSmuME footer
+on downloaded saves is removed. The device id is looked up once (the device
+created by the pairing) and kept in `romm/device.txt`. Saves outside the ROM
+folder (some homebrew) are not covered yet.
+
+## Library index
+
+Opening a platform updates a local index on the SD card
+(`romm/index/<platform id>.tsv`, metadata in `romm/meta/<rom id>.txt`). The
+first sync downloads the platform's ROM list without provider metadata
+(~5 KB per ROM instead of ~100 KB); later syncs only ask for ROMs updated
+since the last one and drop ROMs that were removed from RomM. Lists and the
+detail view then come from the SD card. X in a ROM list rebuilds the index.
+
+`*` marks ROMs that are already in `roms/<folder>/`. In the platform list,
+Y shows all platforms and SELECT hides or shows the selected one
+(`romm/hidden_platforms.txt`).
+
 ## Building
 
 The project needs BlocksDS with Mbed TLS, libcurl and zlib:
@@ -58,7 +247,11 @@ wf-pacman -Sy blocksds-toolchain toolchain-gcc-arm-none-eabi-zlib blocksds-mbedt
 ```
 
 ```bash
-make
+make            # romm-poc.nds
+```
+
+```bash
+make variants   # also the patched DSWiFi builds (see tools/build_dswifi.sh)
 ```
 
 GitHub Actions builds `romm-poc.nds` on every push; see the workflow's
@@ -68,3 +261,6 @@ artifacts.
 
 After a run, send back `<SD>/romm/poc.log`. It contains the timings, TLS
 details and errors. The token is never written to the log.
+
+Each start keeps the previous four logs as `<name>.1.log` (newest) to
+`<name>.4.log`.

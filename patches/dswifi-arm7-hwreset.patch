@@ -1,0 +1,39 @@
+--- a/source/common/wifi_shared.h
++++ b/source/common/wifi_shared.h
+@@ -296,6 +296,7 @@
+ // dspico-romm: ARM7 receive options (WifiData->a7_opts)
+ #define DSPICO_A7_OPT_REGS53   1 // Status + lookahead registers in one CMD53
+ #define DSPICO_A7_OPT_DMA_RING 2 // SDIO DMA straight into the RX ring
++#define DSPICO_A7_OPT_HWRESET  4 // Power-cycle the module (SCFG_WL) at card init
+ 
+ // dspico-romm: WifiData->a7_info[] indices
+ enum {
+--- a/source/arm7/twl/card.twl.c
++++ b/source/arm7/twl/card.twl.c
+@@ -1318,6 +1318,17 @@
+     ctx->tmio.break_early = false;
+     ctx->tmio.block_size = 128;
+ 
++    // dspico-romm: hardware reset of the module. After a restart without a
++    // power cycle the module sometimes did not come up (stuck at "searching").
++    // SCFG_WL bit 0 (WL_OFFB) appears to be the module's power/enable line:
++    // switch it off, wait, and let the code below switch it on again.
++    bool hw_reset = WifiData && (WifiData->a7_opts & DSPICO_A7_OPT_HWRESET);
++    if (hw_reset)
++    {
++        REG_SCFG_WL = 0;
++        swiDelay(20 * 134056); // Same scale as the 5 ms delay below
++    }
++
+     // Select TWL WiFi mode
+     gpioSetWifiMode(GPIO_WIFI_MODE_TWL);
+     swiDelay(5 * 134056); // 5 milliseconds. TODO: Is this delay required?
+@@ -1332,6 +1343,8 @@
+     i2cWriteRegister(I2C_PM, 0x30, 0x13);
+ 
+     REG_SCFG_WL = SCFG_WL_OFFB; // SCFG_WL on?
++    if (hw_reset)
++        swiDelay(20 * 134056); // Let the module power up
+ 
+     ctx->tmio.bus_width = 4;
+     wifi_card_switch_device();
