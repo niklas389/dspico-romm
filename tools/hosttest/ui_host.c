@@ -73,6 +73,7 @@ int main(int argc, char **argv)
         .save_kind = UI_WARN, .clock = "19:42",
     };
     ui_wifi_level = 2;
+    ui_battery = 11;
     ui_draw_game_top(gfx_top, &g);
     ui_strip_t s = { "Nintendo DS", "11 games", tiles, n, 1, 1 * 256,
                      "64.0 MB  \xC2\xB7  on SD card", letters, ui_letter_of(names[1]),

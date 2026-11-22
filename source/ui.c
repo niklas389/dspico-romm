@@ -117,6 +117,26 @@ static void format_size(uint64_t bytes, char *out, size_t len)
 // --- Top screen -------------------------------------------------------------------
 
 int ui_wifi_level = -2;
+int ui_battery = -1;
+
+// Battery: 4 segments; charging = green fill; empty = red
+static void battery_icon(uint16_t *fb, int x, int y, int v)
+{
+    int level = v & 0xF;
+    bool charging = v & 0x80;
+    gfx_color_t frame_c = UI_WHITE;
+    gfx_fill(fb, x, y, 18, 1, frame_c);
+    gfx_fill(fb, x, y + 9, 18, 1, frame_c);
+    gfx_fill(fb, x, y, 1, 10, frame_c);
+    gfx_fill(fb, x + 17, y, 1, 10, frame_c);
+    gfx_fill(fb, x + 18, y + 3, 2, 4, frame_c);
+    gfx_color_t c = charging ? GFX_RGB(120, 230, 120) : level <= 1 ? UI_RED : UI_WHITE;
+    int segs = level >= 15 ? 4 : level >= 11 ? 3 : level >= 7 ? 2 : level >= 3 ? 1 : 0;
+    if (segs == 0 && !charging)
+        gfx_fill(fb, x + 2, y + 2, 2, 6, c); // Almost empty: a red sliver
+    for (int i = 0; i < segs; i++)
+        gfx_fill(fb, x + 2 + i * 4, y + 2, 3, 6, c);
+}
 
 // Three signal bars; level -1 = not connected (crossed out)
 static void wifi_icon(uint16_t *fb, int x, int y, int level)
@@ -141,6 +161,11 @@ void ui_top_header(uint16_t *fb, const char *left, const char *right)
     int x = GFX_W - 5;
     if (right)
         x -= gfx_text(fb, &font_bold, x, 1, UI_WHITE, right, GFX_RIGHT, 90) + 6;
+    if (ui_battery >= 0)
+    {
+        battery_icon(fb, x - 20, 3, ui_battery);
+        x -= 27;
+    }
     if (ui_wifi_level > -2)
         wifi_icon(fb, x - 11, 2, ui_wifi_level);
 }

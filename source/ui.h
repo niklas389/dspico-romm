@@ -41,6 +41,8 @@ void ui_initials(const char *name, char *out, int len);
 
 // Wi-Fi icon in the top bar: -2 hidden, -1 not connected, 0..3 signal bars
 extern int ui_wifi_level;
+// Battery icon: -1 hidden, else getBatteryLevel() (level 0..15, bit 7 charging)
+extern int ui_battery;
 
 void ui_top_header(uint16_t *fb, const char *left, const char *right);
 

@@ -99,6 +99,8 @@ static void frame(void)
     {
         // Clock and Wi-Fi state once a second
         ui_wifi_level = wifi_level();
+        if (g_frames % 600 == 60 || ui_battery < 0)
+            ui_battery = (int)(getBatteryLevel() & 0x8F); // Every 10 s (asks the ARM7)
         if (g_top_header)
             ui_top_header(gfx_top, "RomM", clock_str());
     }
