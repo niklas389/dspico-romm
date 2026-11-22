@@ -230,7 +230,7 @@ static bool wifi_shutdown(void)
     Wifi_DisconnectAP();
     Wifi_DisableWifi();
     for (int i = 0; i < 60; i++) // Let the ARM7 reach "disabled"
-        swiWaitForVBlank();
+        cothread_yield_irq(IRQ_VBLANK); // lets lwIP (DHCP) run
     return true;
 }
 
@@ -260,7 +260,7 @@ static bool wifi_wait_assoc(int attempt)
             return true;
         if (st == ASSOCSTATUS_CANNOTCONNECT)
             break;
-        swiWaitForVBlank();
+        cothread_yield_irq(IRQ_VBLANK); // lets lwIP (DHCP) run
     }
 #ifdef DSPICO_DSWIFI
     extern void Wifi_A7Info(u32 out[16]);
@@ -304,7 +304,7 @@ static void step_wifi(void)
         printf("Wi-Fi: retry 2 of 3...\n");
         Wifi_DisconnectAP();
         for (int i = 0; i < 60; i++)
-            swiWaitForVBlank();
+            cothread_yield_irq(IRQ_VBLANK); // lets lwIP (DHCP) run
         Wifi_AutoConnect();
         ok = wifi_wait_assoc(2);
     }
@@ -326,7 +326,7 @@ static void step_wifi(void)
     u32 ip = Wifi_GetIP();
     for (int i = 0; i < 600 && (ip == 0 || ip == 0xFFFFFFFF); i++) // ~10 s
     {
-        swiWaitForVBlank();
+        cothread_yield_irq(IRQ_VBLANK); // lets lwIP (DHCP) run
         ip = Wifi_GetIP();
     }
     unsigned char mac[6] = { 0 };
@@ -416,7 +416,7 @@ static void step_heartbeat(void)
         log_printf("ARM7 RX options turned OFF (first request failed), retrying\n");
         buf_free(&body);
         for (int i = 0; i < 60; i++)
-            swiWaitForVBlank();
+            cothread_yield_irq(IRQ_VBLANK); // lets lwIP (DHCP) run
         ok = net_get("/api/heartbeat", false, &body, &res);
         net_log_result("heartbeat (retry)", &res);
     }

@@ -554,7 +554,7 @@ bool net_wifi_ensure(void)
         }
         if (s == ASSOCSTATUS_CANNOTCONNECT)
             break;
-        swiWaitForVBlank(); // Lets the Wi-Fi threads run
+        cothread_yield_irq(IRQ_VBLANK); // Lets lwIP run (swiWaitForVBlank halts all threads)
     }
     log_printf("Wi-Fi: reconnect failed (%s)\n", net_wifi_status());
     return false;
