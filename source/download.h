@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "net.h"
+#include "unzip.h"
 
 typedef struct
 {
@@ -40,5 +41,38 @@ bool download_exists(const config_t *cfg, const char *folder, const char *fs_nam
 bool download_rom(const config_t *cfg, int rom_id, const char *fs_name, uint64_t size,
                   const char *folder, net_progress_fn cb, void *ctx,
                   download_result_t *res);
+
+// Archives (.zip): the archive is downloaded into the library folder, then
+// the ROM inside is extracted to "<archive stem>.<rom ext>" and the archive
+// deleted. If extraction fails for another reason than corrupt data, the
+// archive stays so a retry needs no new download.
+typedef struct
+{
+    bool ok;
+    bool cancelled;
+    bool raw;
+    bool zip_removed;
+    int entries;
+    uint64_t in_bytes, out_bytes;
+    uint32_t ms;
+    zip_stats_t st;
+    char entry[256];
+    char path[CFG_PATH_MAX + 256];
+    char error[160];
+} extract_result_t;
+
+bool download_is_archive(const char *fs_name);
+
+// i-th possible library file name of a RomM file (for an archive: the stem
+// with each ROM extension of the folder). False when there are no more.
+bool download_local_name(const char *folder, const char *fs_name, int i,
+                         char *out, int out_len);
+
+// Finds the library copy of a RomM file (archive aware). name may be NULL.
+bool download_local(const config_t *cfg, const char *folder, const char *fs_name,
+                    char *name, int name_len, uint64_t *size);
+
+bool download_extract(const config_t *cfg, const char *folder, const char *zip_name,
+                      zip_progress_fn cb, void *ctx, extract_result_t *res);
 
 #endif

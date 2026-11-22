@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: MIT
+#ifndef ROMM_UNZIP_H
+#define ROMM_UNZIP_H
+
+// Minimal zip reader for ROM archives: finds the ROM inside a .zip (stored
+// or deflate, ZIP64 aware) and streams it, inflated, into a sink. The CRC-32
+// of the output is checked against the archive.
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+typedef struct
+{
+    char name[256];          // Path inside the archive
+    uint64_t comp_size;
+    uint64_t size;           // Uncompressed
+    uint64_t local_offset;   // Local file header
+    uint32_t crc;
+    uint16_t method;         // 0 = stored, 8 = deflate
+    uint16_t flags;
+    int entries;             // Files in the archive (for the log)
+} zip_entry_t;
+
+// Output: the extractor asks for space, fills it, commits it (zero copy into
+// the SD writer's ring). reserve returns NULL on a write error.
+typedef struct
+{
+    void *(*reserve)(void *ctx, size_t *avail);
+    void (*commit)(void *ctx, size_t n);
+    void *ctx;
+} zip_sink_t;
+
+// Progress: return false to cancel.
+typedef bool (*zip_progress_fn)(void *ctx, uint64_t done, uint64_t total);
+
+typedef struct
+{
+    uint64_t in_bytes, out_bytes;
+    uint64_t read_us;        // fread() of the archive
+    uint64_t inflate_us;     // inflate() or copy
+    uint64_t crc_us;
+    uint64_t sink_us;        // Waiting for space in the sink
+    bool cancelled;
+    char error[128];
+} zip_stats_t;
+
+// Picks the ROM: the largest file whose extension is in exts (comma-
+// separated, e.g. "nds,dsi,srl"), else fails. False with err set on errors.
+bool zip_find_rom(FILE *f, const char *exts, zip_entry_t *e, char *err, int err_len);
+
+bool zip_extract(FILE *f, const zip_entry_t *e, const zip_sink_t *sink,
+                 zip_progress_fn cb, void *ctx, zip_stats_t *st);
+
+// True for file names the library stores as archives (.zip).
+bool zip_is_archive_name(const char *name);
+
+#endif

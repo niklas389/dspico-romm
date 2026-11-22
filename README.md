@@ -119,6 +119,19 @@ attempts). On a DSpico the file is written with interrupt-driven DMA
 (`sdraw=1` in `config.ini`, the default); otherwise through the DLDI driver.
 B cancels. Y in the ROM menu runs the speed test.
 
+### Zip archives
+
+RomM can't convert a single-ROM `.zip` (`format=nds` returns "can't be served
+as nds"), so archives are unpacked on the console: the `.zip` is downloaded
+into the library folder, the ROM inside (the largest `.nds`/`.dsi`/`.srl`,
+`.gba` or `.gb`/`.gbc`, by folder) is inflated to `<zip name>.<rom ext>`, its
+CRC-32 is checked, and the archive is deleted. The ROM keeps the archive's
+name, so save files match the other clients' (which keep the `.zip`).
+Stored and deflate entries and ZIP64 are supported; 7z/rar are not. If
+unpacking is cancelled or fails for another reason than corrupt data, the
+archive stays on the SD card and the next A unpacks it without downloading.
+The log line `read / inflate / crc / SD wait` shows where the time goes.
+
 ## Library index
 
 Opening a platform updates a local index on the SD card

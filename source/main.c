@@ -440,24 +440,63 @@ static bool download_progress(void *ctx, uint64_t now, uint64_t total,
     return true;
 }
 
-// Downloads a ROM into <drive>/roms/<folder>/ (download.c).
+typedef struct
+{
+    uint32_t t0, last_ui_ms;
+} unzip_ui_t;
+
+static bool extract_progress(void *ctx, uint64_t done, uint64_t total)
+{
+    unzip_ui_t *ui = ctx;
+    scanKeys();
+    if (keysDown() & KEY_B)
+        return false;
+    uint32_t ms = net_now_ms() - ui->t0;
+    if (ms - ui->last_ui_ms < 500)
+        return true;
+    ui->last_ui_ms = ms;
+    uint32_t kbps = ms ? (uint32_t)((done * 1000 / 1024) / ms) : 0;
+    printf("\x1b[12;0H%lu%%  %lu KB/s  %lus        \n",
+           (unsigned long)(total ? done * 100 / total : 0), (unsigned long)kbps,
+           (unsigned long)(ms / 1000));
+    return true;
+}
+
+static void log_extract(const extract_result_t *x)
+{
+    uint32_t kbps = x->ms ? (uint32_t)((x->st.out_bytes * 1000 / 1024) / x->ms) : 0;
+    log_printf("\n[Unpack] %s -> %s\n", x->entry, x->path);
+    log_printf("  %s: %llu -> %llu B in %lu ms (%lu KB/s out), %s, %d file(s)\n",
+               x->ok ? "done" : (x->cancelled ? "cancelled" : "FAILED"),
+               (unsigned long long)x->st.in_bytes, (unsigned long long)x->st.out_bytes,
+               (unsigned long)x->ms, (unsigned long)kbps,
+               x->raw ? "DSpico DMA" : "DLDI", x->entries);
+    log_printf("  read %lu ms, inflate %lu ms, crc %lu ms, SD wait %lu ms\n",
+               (unsigned long)(x->st.read_us / 1000), (unsigned long)(x->st.inflate_us / 1000),
+               (unsigned long)(x->st.crc_us / 1000), (unsigned long)(x->st.sink_us / 1000));
+    if (!x->ok && !x->cancelled)
+        log_printf("  %s%s\n", x->error, x->zip_removed ? " (archive deleted)" : "");
+}
+
+// Downloads a ROM into <drive>/roms/<folder>/ (download.c). Archives are
+// extracted afterwards.
 static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
                                 const char *folder)
 {
-    char target[CFG_PATH_MAX + 256];
-    download_target(&g_cfg, folder, fs_name, target, sizeof(target));
-
-    consoleClear();
+    bool archive = download_is_archive(fs_name);
     char sz[16];
     format_size(size, sz, sizeof(sz));
+
+    consoleClear();
     printf("Download\n%.31s\n%s -> roms/%s/\n", fs_name, sz, folder);
 
     uint64_t have = 0;
-    if (download_exists(&g_cfg, folder, fs_name, &have))
+    char local[256];
+    if (download_local(&g_cfg, folder, fs_name, local, sizeof(local), &have))
     {
         char hs[16];
         format_size(have, hs, sizeof(hs));
-        printf("\nAlready on SD (%s).\nA: download again  B: back\n", hs);
+        printf("\nAlready on SD (%s):\n%.31s\nA: download again  B: back\n", hs, local);
         if (!(wait_key() & KEY_A))
             return;
         consoleClear();
@@ -465,19 +504,44 @@ static void download_to_library(int rom_id, const char *fs_name, uint64_t size,
     }
     printf("\nB: cancel\n");
 
-    dl_ui_t ui = { 0 };
-    download_result_t r;
-    bool ok = download_rom(&g_cfg, rom_id, fs_name, size, folder, download_progress, &ui, &r);
+    // An archive left by a failed extraction is reused
+    uint64_t zsize = 0;
+    bool have_zip = archive && download_exists(&g_cfg, folder, fs_name, &zsize) &&
+                    zsize == size;
+    if (have_zip)
+        log_printf("\n[Download] archive already on SD, unpacking it\n");
+    else
+    {
+        dl_ui_t ui = { 0 };
+        download_result_t r;
+        bool ok = download_rom(&g_cfg, rom_id, fs_name, size, folder, download_progress,
+                               &ui, &r);
 
-    uint32_t kbps = r.ms ? (uint32_t)((r.bytes * 1000 / 1024) / r.ms) : 0;
-    printf("\x1b[10;0H");
-    log_printf("\n[Download] %s -> %s\n", fs_name, r.path);
-    log_printf("  %s: %llu B in %lu ms (%lu KB/s), %s, %d request(s)\n",
-               ok ? "done" : (r.cancelled ? "cancelled" : "FAILED"),
-               (unsigned long long)r.bytes, (unsigned long)r.ms, (unsigned long)kbps,
-               r.raw ? "DSpico DMA" : "DLDI", r.attempts);
-    if (!ok && !r.cancelled)
-        log_printf("  %s\n", r.error);
+        uint32_t kbps = r.ms ? (uint32_t)((r.bytes * 1000 / 1024) / r.ms) : 0;
+        printf("\x1b[10;0H");
+        log_printf("\n[Download] %s -> %s\n", fs_name, r.path);
+        log_printf("  %s: %llu B in %lu ms (%lu KB/s), %s, %d request(s)\n",
+                   ok ? "done" : (r.cancelled ? "cancelled" : "FAILED"),
+                   (unsigned long long)r.bytes, (unsigned long)r.ms, (unsigned long)kbps,
+                   r.raw ? "DSpico DMA" : "DLDI", r.attempts);
+        if (!ok && !r.cancelled)
+            log_printf("  %s\n", r.error);
+        if (!ok)
+        {
+            press_any_key();
+            return;
+        }
+    }
+
+    if (archive)
+    {
+        printf("\x1b[11;0HUnpacking...  B: cancel\n");
+        unzip_ui_t ui = { net_now_ms(), 0 };
+        extract_result_t x;
+        download_extract(&g_cfg, folder, fs_name, extract_progress, &ui, &x);
+        printf("\x1b[13;0H");
+        log_extract(&x);
+    }
     press_any_key();
 }
 
@@ -575,7 +639,9 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
         }
 
         printf("\x1b[19;0H%s\n", *on_sd ? "On SD card" : "");
-        if (strcasecmp(e->ext, "zip") == 0 || strcasecmp(e->ext, "7z") == 0)
+        if (download_is_archive(e->fs_name))
+            printf("(zip: unpacked after download)\n");
+        else if (strcasecmp(e->ext, "7z") == 0 || strcasecmp(e->ext, "rar") == 0)
             printf("(archive: not launchable)\n");
         printf("\x1b[21;0HA:download Y:speed test B:back");
 
@@ -585,7 +651,7 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
         if (k & KEY_A)
         {
             download_to_library(e->id, e->fs_name, e->size, folder);
-            *on_sd = download_exists(&g_cfg, folder, e->fs_name, NULL);
+            *on_sd = download_local(&g_cfg, folder, e->fs_name, NULL, 0, NULL);
         }
         else if (k & KEY_Y)
         {
@@ -659,7 +725,11 @@ static void browse_platform(int platform_id, const char *platform_name,
         for (int i = 0; i < idx.count; i++)
         {
             const rom_entry_t *e = &idx.e[i];
-            on_sd[i] = dir_list_has(&onsd, e->fs_name);
+            char cand[256];
+            for (int k = 0; !on_sd[i] &&
+                            download_local_name(folder, e->fs_name, k, cand, sizeof(cand));
+                 k++)
+                on_sd[i] = dir_list_has(&onsd, cand);
             char sz[16];
             format_size(e->size, sz, sizeof(sz));
             snprintf(label_buf[i], sizeof(label_buf[i]), "%c%-22.22s %6s",
