@@ -202,6 +202,8 @@ typedef struct
     uint32_t first_byte_ms; // Absolute net_now_ms() of the first body byte
     bool write_failed;
     net_result_t *res;
+    curl_mime *mime;        // multipart body (net_send_file)
+    const char *method;     // custom method, e.g. "PUT"
 } xfer_t;
 
 static int debug_cb(CURL *h, curl_infotype type, char *data, size_t size,
@@ -432,6 +434,10 @@ static bool perform(const char *path, const char *post_json, bool auth,
                                               post_json, res->error, x);
     if (range)
         curl_easy_setopt(g_curl, CURLOPT_RANGE, range);
+    if (x->mime)
+        curl_easy_setopt(g_curl, CURLOPT_MIMEPOST, x->mime);
+    if (x->method)
+        curl_easy_setopt(g_curl, CURLOPT_CUSTOMREQUEST, x->method);
 
     x->start_ms = net_now_ms();
     CURLcode rc = curl_easy_perform(g_curl);
@@ -470,6 +476,35 @@ bool net_get(const char *path, bool auth, buf_t *out, net_result_t *res)
             buf_free(out);
         ok = perform(path, NULL, auth, true, NULL, &x);
     }
+    return ok;
+}
+
+bool net_send_file(const char *method, const char *path, const char *field,
+                   const char *filename, const void *data, size_t len, buf_t *out,
+                   net_result_t *res)
+{
+    if (!g_curl)
+    {
+        memset(res, 0, sizeof(*res));
+        snprintf(res->error, sizeof(res->error), "net not initialised");
+        return false;
+    }
+    curl_mime *mime = curl_mime_init(g_curl);
+    curl_mimepart *part = curl_mime_addpart(mime);
+    curl_mime_name(part, field);
+    curl_mime_filename(part, filename);
+    curl_mime_type(part, "application/octet-stream");
+    curl_mime_data(part, data, len); // curl copies the data
+    xfer_t x = { .mem = out, .res = res, .mime = mime,
+                 .method = strcmp(method, "POST") == 0 ? NULL : method };
+    bool ok = perform(path, NULL, true, true, NULL, &x);
+    if (!ok && lost_wifi(res) && net_wifi_ensure())
+    {
+        if (out)
+            buf_free(out);
+        ok = perform(path, NULL, true, true, NULL, &x);
+    }
+    curl_mime_free(mime);
     return ok;
 }
 

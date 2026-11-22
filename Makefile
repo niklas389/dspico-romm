@@ -42,7 +42,7 @@ LIBDIRS		:= $(DSWIFI_DIR) \
 		   $(BLOCKSDSEXT)/libcurl \
 		   $(BLOCKSDSEXT)/mbedtls
 
-DEFINES		:= -DPOC_VERSION=\"0.37.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
+DEFINES		:= -DPOC_VERSION=\"0.38.0\" -DTCP_WND_LABEL="\"$(WND_LABEL)\"" \
 		   -DTCP_WND_BYTES=$(WND_BYTES) $(EXTRA_DEFINES)
 
 include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile

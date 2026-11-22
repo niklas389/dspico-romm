@@ -57,6 +57,12 @@ bool net_get(const char *path, bool auth, buf_t *out, net_result_t *res);
 bool net_post_json(const char *path, const char *json, bool auth, buf_t *out,
                    net_result_t *res);
 
+// Multipart upload of one file (form field `field`) with the Bearer token,
+// method "POST" or "PUT"; response into memory.
+bool net_send_file(const char *method, const char *path, const char *field,
+                   const char *filename, const void *data, size_t len, buf_t *out,
+                   net_result_t *res);
+
 // GET <url><path> streaming the body into fp (fp may be NULL to discard).
 bool net_download(const char *path, FILE *fp, net_progress_fn cb, void *ctx,
                   net_result_t *res);

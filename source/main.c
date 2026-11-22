@@ -33,6 +33,7 @@
 #include "prof.h"
 #include "qr.h"
 #include "romindex.h"
+#include "savesync.h"
 #include "unzipbench.h"
 
 #define LIST_ROWS     16
@@ -79,6 +80,8 @@ static void frame(void)
 #ifdef DSPICO_DSWIFI
 static void wifi_fw_log(void);
 #endif
+
+static void rom_save_sync(const rom_entry_t *e, const char *folder, bool run);
 
 static u16 wait_key(void)
 {
@@ -765,13 +768,15 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
                 printf("\n%.160s\n", summary + 2);
         }
 
-        printf("\x1b[19;0H%s\n", *on_sd ? "On SD card" : "");
+        printf("\x1b[18;0H%s\n", *on_sd ? "On SD card" : "");
+        if (*on_sd)
+            rom_save_sync(e, folder, false); // "Save: <status>"
         if (download_is_archive(e->fs_name))
             printf("(zip: unpacked after download)\n");
         else if (strcasecmp(e->ext, "7z") == 0 || strcasecmp(e->ext, "rar") == 0)
             printf("(archive: not launchable)\n");
         printf("\x1b[21;0HA:download Y:speed test B:back");
-        printf("\x1b[22;0HX:unzip CPU test");
+        printf("\x1b[22;0HX:unzip CPU test%s", *on_sd ? " SEL:save" : "");
 
         u16 k = wait_key();
         if (k & KEY_B)
@@ -785,6 +790,10 @@ static void rom_detail(const rom_entry_t *e, const char *folder, bool *on_sd)
         {
             bench_run_suite(&g_cfg, e->id, e->fs_name, e->size);
             press_any_key();
+        }
+        else if ((k & KEY_SELECT) && *on_sd)
+        {
+            rom_save_sync(e, folder, true);
         }
         else if (k & KEY_X)
         {
@@ -943,6 +952,182 @@ static void hidden_save(const int *ids, int n)
     fclose(f);
 }
 
+// --- Save sync ---------------------------------------------------------------
+
+static bool save_capable(const char *folder)
+{
+    static const char *f[] = { "nds", "dsi", "gba", "gb", "gbc" };
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++)
+        if (strcmp(folder, f[i]) == 0)
+            return true;
+    return false;
+}
+
+// At start: sync every ROM on the SD card whose save changed on one side only.
+static void savesync_auto(const int *ids, const char **folders, int n)
+{
+    if (!g_cfg.token[0] || !ss_init(&g_cfg))
+        return;
+    int up = 0, down = 0, conflicts = 0, errors = 0, checked = 0;
+    uint32_t t0 = net_now_ms();
+    log_printf("\n[Save sync] slot \"%s\"\n", g_cfg.save_slot);
+    for (int p = 0; p < n; p++)
+    {
+        if (!save_capable(folders[p]))
+            continue;
+        rom_index_t idx;
+        idx_init(&idx, ids[p]);
+        if (!idx_load(&g_cfg, &idx) || idx.count == 0)
+        {
+            idx_free(&idx);
+            continue;
+        }
+        ss_list_t srv;
+        if (!ss_fetch(&g_cfg, ids[p], 0, &srv))
+        {
+            errors++;
+            idx_free(&idx);
+            continue;
+        }
+        for (int i = 0; i < idx.count; i++)
+        {
+            ss_status_t st;
+            ss_status(&g_cfg, &idx.e[i], folders[p], &srv, &st);
+            if (st.action == SS_NONE)
+                continue;
+            checked++;
+            consoleClear();
+            printf("Syncing saves...\n\n%.31s\n%s\n", idx.e[i].name,
+                   ss_action_name(st.action));
+            if (st.action == SS_CONFLICT)
+            {
+                conflicts++;
+                log_printf("  %s: conflict (DSi %s, RomM %s)\n", idx.e[i].name,
+                           st.local_hash, st.srv.hash[0] ? st.srv.hash : "-");
+                continue;
+            }
+            if (st.action == SS_IN_SYNC && st.base_local[0])
+                continue;
+            char err[128];
+            log_printf("  %s: %s\n", idx.e[i].name, ss_action_name(st.action));
+            if (ss_apply(&g_cfg, &st, st.action, err, sizeof(err)))
+            {
+                up += st.action == SS_UPLOAD;
+                down += st.action == SS_DOWNLOAD;
+            }
+            else
+            {
+                errors++;
+                log_printf("    failed: %s\n", err);
+            }
+        }
+        ss_list_free(&srv);
+        idx_free(&idx);
+    }
+    log_printf("  %d checked: %d uploaded, %d downloaded, %d conflicts, %d errors "
+               "(%lu ms)\n", checked, up, down, conflicts, errors,
+               (unsigned long)(net_now_ms() - t0));
+    if (up || down || conflicts || errors)
+    {
+        consoleClear();
+        printf("Save sync\n\n%d uploaded\n%d downloaded\n", up, down);
+        if (conflicts)
+            printf("%d conflict(s): open the game\nto choose a version\n", conflicts);
+        if (errors)
+            printf("%d error(s), see log\n", errors);
+        press_any_key();
+    }
+}
+
+static void format_time(time_t t, char *out, int len)
+{
+    struct tm *tm = localtime(&t);
+    snprintf(out, len, "%04d-%02d-%02d %02d:%02d", (tm->tm_year + 1900) % 10000,
+             (tm->tm_mon + 1) % 100, tm->tm_mday % 100, tm->tm_hour % 100, tm->tm_min % 100);
+}
+
+// Detail view: status line and SELECT = sync this game's save.
+static void rom_save_sync(const rom_entry_t *e, const char *folder, bool run)
+{
+    if (!save_capable(folder) || !g_cfg.token[0] || !ss_init(&g_cfg))
+        return;
+    ss_list_t srv;
+    if (!ss_fetch(&g_cfg, 0, e->id, &srv))
+    {
+        printf("Save: RomM not reachable\n");
+        return;
+    }
+    ss_status_t st;
+    ss_status(&g_cfg, e, folder, &srv, &st);
+    ss_list_free(&srv);
+    if (!run)
+    {
+        printf("Save: %s\n", ss_action_name(st.action));
+        return;
+    }
+
+    int action = st.action;
+    consoleClear();
+    printf("Save sync\n%.31s\n\n", e->name);
+    if (st.have_local)
+    {
+        char t[32];
+        format_time(st.local_mtime, t, sizeof(t));
+        printf("DSi:  %s\n      %lu B\n", t, (unsigned long)st.local_size);
+    }
+    else
+        printf("DSi:  none\n");
+    if (st.have_server)
+        printf("RomM: %.16s UTC\n      %lu B\n", st.srv.updated_at,
+               (unsigned long)st.srv.size);
+    else
+        printf("RomM: none\n");
+    printf("\nStatus: %s\n\n", ss_action_name(action));
+
+    if (action == SS_CONFLICT || action == SS_IN_SYNC)
+    {
+        if (action == SS_CONFLICT)
+            printf("Both changed. Keep which?\n");
+        else
+            printf("Force a direction?\n");
+        printf("L: DSi -> RomM (upload)\nR: RomM -> DSi (download)\nB: cancel\n");
+        printf("(the replaced DSi save is kept\n in romm/save-backup/)\n");
+        while (1)
+        {
+            u16 k = wait_key();
+            if ((k & KEY_L) && st.have_local)
+            {
+                action = SS_UPLOAD;
+                break;
+            }
+            if ((k & KEY_R) && st.have_server)
+            {
+                action = SS_DOWNLOAD;
+                break;
+            }
+            if (k & KEY_B)
+                return;
+        }
+    }
+    else if (action == SS_NONE)
+    {
+        printf("Nothing to sync.\n");
+        press_any_key();
+        return;
+    }
+
+    char err[128];
+    log_printf("\n[Save sync] %s: %s\n", e->name, ss_action_name(action));
+    if (ss_apply(&g_cfg, &st, action, err, sizeof(err)))
+        printf("%s: done\n", action == SS_UPLOAD ? "Uploaded" : "Downloaded");
+    else
+    {
+        printf("Failed: %.60s\n", err);
+        log_printf("  failed: %s\n", err);
+    }
+    press_any_key();
+}
+
 static void step_platforms(void)
 {
     buf_t body = { 0 };
@@ -986,6 +1171,25 @@ static void step_platforms(void)
     int hidden[64], n_hidden = 0;
     hidden_load(hidden, 64, &n_hidden);
     bool show_all = false;
+
+    // Automatic save sync for the visible platforms (conflicts are left for
+    // the detail view, where the user decides)
+    {
+        int ids[64], n_ids = 0;
+        const char *folders[64];
+        for (int i = 0; i < count && n_ids < 64; i++)
+        {
+            bool hid = false;
+            for (int j = 0; j < n_hidden; j++)
+                hid |= hidden[j] == pl[i].id;
+            if (!hid)
+            {
+                ids[n_ids] = pl[i].id;
+                folders[n_ids++] = pl[i].folder;
+            }
+        }
+        savesync_auto(ids, folders, n_ids);
+    }
 
     const char **labels = calloc(count, sizeof(char *));
     char (*label_buf)[40] = calloc(count, sizeof(*label_buf));
