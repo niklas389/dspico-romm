@@ -36,20 +36,21 @@ static void scale_box(const uint8_t *rgb, int w, int sx, int sy, int sw, int sh,
     }
 }
 
-void cover_convert(const uint8_t *rgb, int w, int h, uint16_t *top, uint16_t *tile)
+void cover_fit(const uint8_t *rgb, int w, int h, uint16_t *out, int maxw, int maxh, int *ow,
+               int *oh)
 {
-    // Top: fill 3:4, cropping the longer side around the centre
-    int sw = w, sh = h;
-    if (w * COVER_H > h * COVER_W)
-        sw = h * COVER_W / COVER_H;
-    else
-        sh = w * COVER_H / COVER_W;
-    scale_box(rgb, w, (w - sw) / 2, (h - sh) / 2, sw, sh, top, COVER_W, COVER_H);
-
-    // Tile: square; on portrait covers the upper part (title artwork)
-    int s = w < h ? w : h;
-    int ty = h > s ? (h - s) / 4 : 0;
-    int tx = w > s ? (w - s) / 2 : 0;
-    scale_box(rgb, w, tx, ty, s, s, tile, TILE_S, TILE_S);
+    // Whole image, aspect ratio kept, as large as fits into maxw x maxh
+    int dw = maxw, dh = h * maxw / w;
+    if (dh > maxh)
+    {
+        dh = maxh;
+        dw = w * maxh / h;
+    }
+    if (dw < 1)
+        dw = 1;
+    if (dh < 1)
+        dh = 1;
+    scale_box(rgb, w, 0, 0, w, h, out, dw, dh);
+    *ow = dw;
+    *oh = dh;
 }
-

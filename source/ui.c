@@ -90,7 +90,15 @@ static void tile(uint16_t *fb, int x, int y, int w, int h, const char *label,
 {
     if (img)
     {
-        gfx_blit(fb, x, y, w, h, img, iw, ih, r);
+        // Whole picture, aspect ratio kept, centred (iw, ih: its size)
+        int dw = w, dh = ih * w / iw;
+        if (dh > h)
+        {
+            dh = h;
+            dw = iw * h / ih;
+        }
+        int rr = r * dw / (w > 0 ? w : 1);
+        gfx_blit(fb, x + (w - dw) / 2, y + (h - dh), dw, dh, img, iw, ih, rr > 2 ? rr : 2);
         return;
     }
     gfx_rrect(fb, x, y, w, h, r, color, 0, 0);
@@ -175,13 +183,21 @@ void ui_draw_game_top(uint16_t *fb, const ui_game_t *g)
     background(fb);
     ui_top_header(fb, "RomM", g->clock);
 
-    // Cover (3:4)
+    // Cover: up to 90x120, whole picture centred in that area
     int cx = 8, cy = 24, cw = 90, ch = 120;
-    gfx_rrect(fb, cx - 1, cy - 1, cw + 2, ch + 2, 7, UI_LINE, 0, 0);
     char ini[8];
     ui_initials(g->name, ini, sizeof(ini));
-    tile(fb, cx, cy, cw, ch, ini, ui_name_color(g->name), g->cover, g->cover_w,
-         g->cover_h, 6);
+    if (g->cover)
+    {
+        int x0 = cx + (cw - g->cover_w) / 2, y0 = cy + (ch - g->cover_h) / 2;
+        gfx_rrect(fb, x0 - 1, y0 - 1, g->cover_w + 2, g->cover_h + 2, 5, UI_LINE, 0, 0);
+        gfx_blit(fb, x0, y0, g->cover_w, g->cover_h, g->cover, g->cover_w, g->cover_h, 4);
+    }
+    else
+    {
+        gfx_rrect(fb, cx - 1, cy - 1, cw + 2, ch + 2, 7, UI_LINE, 0, 0);
+        tile(fb, cx, cy, cw, ch, ini, ui_name_color(g->name), NULL, 0, 0, 6);
+    }
 
     int x = 106, w = GFX_W - x - 6, y = 22;
     y += gfx_text_wrap(fb, &font_title, x, y, w, 2, UI_TEXT, g->name) * font_title.height;

@@ -1436,19 +1436,19 @@ static bool strip_animate(int *pos, int sel)
     int target = sel * 256, d = target - *pos;
     if (d == 0)
         return false;
-    int step = d / 3;
+    int step = d / 2;
     if (step == 0)
         step = d > 0 ? 1 : -1;
-    if (d > 0 && step < 24 && d > 24)
-        step = 24;
-    if (d < 0 && step > -24 && d < -24)
-        step = -24;
+    if (d > 0 && step < 48 && d > 48)
+        step = 48;
+    if (d < 0 && step > -48 && d < -48)
+        step = -48;
     *pos += step;
     // Far jumps (letters): snap close to the target first
-    if (*pos < target - 3 * 256)
-        *pos = target - 3 * 256;
-    if (*pos > target + 3 * 256)
-        *pos = target + 3 * 256;
+    if (*pos < target - 2 * 256)
+        *pos = target - 2 * 256;
+    if (*pos > target + 2 * 256)
+        *pos = target + 2 * 256;
     return true;
 }
 
@@ -1648,12 +1648,15 @@ static int letter_jump(const games_t *g, int sel, int dir)
     return sel;
 }
 
+static int g_top_cover_w, g_top_cover_h;
+static uint16_t g_top_cover[COVER_W * COVER_H];
+
 static void game_top(games_t *g, int sel, const char *summary, const uint16_t *cover)
 {
     const rom_entry_t *e = &g->idx.e[sel];
     ui_game_t t = { e->name, g->platform_name, e->regions, e->genres, e->players, summary,
                     e->year, e->size, g->on_sd[sel], download_is_archive(e->fs_name),
-                    NULL, UI_INFO, cover, COVER_W, COVER_H, clock_str() };
+                    NULL, UI_INFO, cover, g_top_cover_w, g_top_cover_h, clock_str() };
     if (save_capable(g->folder) && g->on_sd[sel])
     {
         if (g->save[sel] >= 0)
@@ -1697,6 +1700,7 @@ static void game_page(games_t *g, int sel)
     snprintf(sub, sizeof(sub), "%s  \xC2\xB7  %s%s%s", e->fs_name, sz,
              publisher[0] ? "  \xC2\xB7  " : "", publisher);
     int scroll = 0;
+    bool cover_tried = false;
     while (1)
     {
         ui_draw_page(gfx_bot, e->name, sub, summary[0] ? summary : "No description in RomM.",
@@ -1704,6 +1708,23 @@ static void game_page(games_t *g, int sel)
                          ? "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download again  Y: save  B: back"
                          : "\xE2\x96\xB2\xE2\x96\xBC scroll  A: download  B: back",
                      &scroll);
+        if (!cover_tried)
+        {
+            // Opened before the background worker got to this cover: fetch it
+            // now, after the page is on screen
+            cover_tried = true;
+            frame();
+            if (g->cov[sel] == COV_UNKNOWN)
+                g->cov[sel] = (uint8_t)cover_state(&g_cfg, e);
+            if (g->cov[sel] == COV_MISSING)
+            {
+                int r = cover_fetch(&g_cfg, e);
+                g->cov[sel] = (uint8_t)(r == COV_MISSING ? COV_FAILED : r);
+                if (r == COV_CACHED &&
+                    cover_load_top(&g_cfg, e->id, g_top_cover, &g_top_cover_w, &g_top_cover_h))
+                    game_top(g, sel, NULL, g_top_cover);
+            }
+        }
         u16 k = wait_key(), rep = keysDownRepeat();
         if (rep & KEY_DOWN)
             scroll++;
@@ -1837,7 +1858,7 @@ static int covw_thread(void *arg)
         }
         w->busy = true;
         games_t *g = w->g;
-        int n = g->idx.count, f = w->focus, pick = -1;
+        int n = g->idx.count, f = w->focus, pick = -1, checks = 0;
         // Nearest game whose cover state is unknown or missing
         for (int d = 0; d < n && pick < 0; d++)
             for (int side = -1; side <= 1 && pick < 0; side += 2)
@@ -1850,16 +1871,17 @@ static int covw_thread(void *arg)
                     g->cov[i] = (uint8_t)cover_state(&g_cfg, &g->idx.e[i]);
                     if (g->cov[i] == COV_CACHED)
                         w->fetched++;
-                    pick = -2; // One SD check per round, then yield
+                    if (++checks == 12)
+                        pick = -2; // Some SD checks per round, then yield
                 }
-                else if (g->cov[i] == COV_MISSING && w->resting)
+                if (pick < 0 && g->cov[i] == COV_MISSING && w->resting)
                     pick = i;
             }
         if (pick >= 0)
         {
+            // Main pauses the worker only between jobs, so g is still valid
             int r = cover_fetch(&g_cfg, &g->idx.e[pick]);
-            if (!w->pause && !w->stop && w->g == g && pick < g->idx.count)
-                g->cov[pick] = (uint8_t)(r == COV_MISSING ? COV_FAILED : r);
+            g->cov[pick] = (uint8_t)(r == COV_MISSING ? COV_FAILED : r);
             if (r == COV_CACHED)
                 w->fetched++;
         }
@@ -1923,12 +1945,13 @@ static void games_load_tiles(games_t *g, int sel)
             if (i < 0 || i >= n || g->cov[i] != COV_CACHED || g->timg[i])
                 continue;
             uint16_t *img = malloc(TILE_S * TILE_S * 2);
-            if (img && cover_load_tile(&g_cfg, g->idx.e[i].id, img))
+            int iw, ih;
+            if (img && cover_load_tile(&g_cfg, g->idx.e[i].id, img, &iw, &ih))
             {
                 g->timg[i] = img;
                 g->tiles[i].img = img;
-                g->tiles[i].img_w = TILE_S;
-                g->tiles[i].img_h = TILE_S;
+                g->tiles[i].img_w = iw;
+                g->tiles[i].img_h = ih;
             }
             else
             {
@@ -1956,7 +1979,7 @@ static void browse_platform(int platform_id, const char *platform_name,
     bool bg_running = false;
     static covw_t cw;
     bool cw_running = false;
-    static uint16_t top_cover[COVER_W * COVER_H];
+    uint16_t *top_cover = g_top_cover;
     while (!g_quit)
     {
         if (full || !have)
@@ -2062,8 +2085,14 @@ static void browse_platform(int platform_id, const char *platform_name,
             // Details once the selection rests (SD reads, save hashing)
             if (shown != sel)
             {
+                // Cover right away (one small SD read), the rest once it rests
                 summary[0] = 0;
-                game_top(&g, sel, NULL, cov_img);
+                if (g.cov[sel] == COV_UNKNOWN)
+                    g.cov[sel] = (uint8_t)cover_state(&g_cfg, e);
+                if (g.cov[sel] == COV_CACHED &&
+                    cover_load_top(&g_cfg, e->id, top_cover, &g_top_cover_w, &g_top_cover_h))
+                    cover_for = sel;
+                game_top(&g, sel, NULL, cover_for == sel ? top_cover : NULL);
                 shown = sel;
                 idle = 0;
             }
@@ -2071,8 +2100,6 @@ static void browse_platform(int platform_id, const char *platform_name,
             {
                 game_summary(e->id, summary, sizeof(summary), NULL, 0);
                 games_save_status(&g, sel);
-                if (g.cov[sel] == COV_CACHED && cover_load_top(&g_cfg, e->id, top_cover))
-                    cover_for = sel;
                 game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
             }
             else if (idle > 12 && g.save[sel] < 0 && g.have_srv && g.on_sd[sel] &&
@@ -2085,19 +2112,16 @@ static void browse_platform(int platform_id, const char *platform_name,
             else if (idle > 12 && cover_for != sel && g.cov[sel] == COV_CACHED)
             {
                 // The cover arrived while the selection rests
-                if (cover_load_top(&g_cfg, e->id, top_cover))
+                if (cover_load_top(&g_cfg, e->id, top_cover, &g_top_cover_w, &g_top_cover_h))
                     cover_for = sel;
                 game_top(&g, sel, summary, cover_for == sel ? top_cover : NULL);
             }
             if (cw_running)
             {
                 cw.focus = sel;
-                cw.resting = idle > 20;
-                if (cw.fetched != seen_fetched || idle < 2)
-                {
-                    seen_fetched = cw.fetched;
-                    games_load_tiles(&g, sel);
-                }
+                cw.resting = idle > 10;
+                (void)seen_fetched;
+                games_load_tiles(&g, sel); // At most one SD read per frame
             }
 
             snprintf(sub, sizeof(sub), "%d game%s", g.idx.count, g.idx.count == 1 ? "" : "s");
@@ -2423,7 +2447,7 @@ int main(int argc, char **argv)
 
     gfx_init();
     log_set_echo(false);
-    keysSetRepeat(18, 4);
+    keysSetRepeat(14, 3);
     splash_top(NULL);
     step_mark(ST_SD, 1, NULL);
 

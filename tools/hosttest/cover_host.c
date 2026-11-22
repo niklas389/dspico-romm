@@ -14,11 +14,11 @@
 int main(int argc,char**argv){
   int w,h,c; unsigned char *rgb=stbi_load(argv[1],&w,&h,&c,3); if(!rgb){printf("decode fail\n");return 1;}
   static uint16_t top[COVER_W*COVER_H], tile[TILE_S*TILE_S];
-  cover_convert(rgb,w,h,top,tile);
+  int tw,th,sw,sh; cover_fit(rgb,w,h,top,COVER_W,COVER_H,&tw,&th); cover_fit(rgb,w,h,tile,TILE_S,TILE_S,&sw,&sh);
   gfx_alloc();
-  ui_game_t g={"Pokémon White Version","Nintendo DS","USA, Europe","RPG","1",NULL,2010,256u<<20,true,false,"in sync",UI_OK,top,COVER_W,COVER_H,"19:42"};
+  ui_game_t g={"Pokémon White Version","Nintendo DS","USA, Europe","RPG","1",NULL,2010,256u<<20,true,false,"in sync",UI_OK,top,tw,th,"19:42"};
   ui_wifi_level=3; ui_draw_game_top(gfx_top,&g);
-  ui_tile_t t[3]={{"A","A",ui_name_color("A"),NULL,0,0,0},{"Pokémon White Version","PWV",0,tile,TILE_S,TILE_S,UI_TILE_ON_SD},{"Pokémon Black","PB",ui_name_color("PB"),tile,TILE_S,TILE_S,0}};
+  ui_tile_t t[3]={{"A","A",ui_name_color("A"),NULL,0,0,0},{"Pokémon White Version","PWV",0,tile,sw,sh,UI_TILE_ON_SD},{"Pokémon Black","PB",ui_name_color("PB"),tile,sw,sh,0}};
   bool letters[27]={0}; letters[16]=1;
   ui_strip_t s={"Nintendo DS","3 games",t,3,1,256,NULL,letters,16,"x",0,0};
   ui_draw_strip(gfx_bot,&s);
