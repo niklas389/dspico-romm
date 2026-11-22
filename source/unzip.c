@@ -47,7 +47,7 @@ bool unzip_state_was_itcm; // Last inflateInit2 got the ITCM buffer
 static bool itcm_state_used;
 bool unzip_state_itcm = true;
 
-static voidpf z_alloc(voidpf opaque, uInt items, uInt size)
+voidpf unzip_zalloc(voidpf opaque, uInt items, uInt size)
 {
     (void)opaque;
     size_t n = (size_t)items * size;
@@ -60,7 +60,7 @@ static voidpf z_alloc(voidpf opaque, uInt items, uInt size)
     return malloc(n);
 }
 
-static void z_free(voidpf opaque, voidpf p)
+void unzip_zfree(voidpf opaque, voidpf p)
 {
     (void)opaque;
     if (p == itcm_state)
@@ -388,8 +388,8 @@ bool zip_extract_src(const zip_source_t *src, const zip_entry_t *e,
     memset(&z, 0, sizeof(z));
     if (e->method == 8)
     {
-        z.zalloc = z_alloc;
-        z.zfree = z_free;
+        z.zalloc = unzip_zalloc;
+        z.zfree = unzip_zfree;
         unzip_state_was_itcm = false;
         if (inflateInit2(&z, -MAX_WBITS) != Z_OK)
         {
@@ -567,8 +567,8 @@ uint64_t zip_bench_inflate(const void *in, size_t n, uint8_t *out, size_t step,
 
     z_stream z;
     memset(&z, 0, sizeof(z));
-    z.zalloc = z_alloc;
-    z.zfree = z_free;
+    z.zalloc = unzip_zalloc;
+    z.zfree = unzip_zfree;
     uint64_t ticks = 0;
     uint32_t c = 0;
     int r = inflateInit2(&z, -MAX_WBITS);

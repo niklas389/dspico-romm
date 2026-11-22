@@ -18,6 +18,8 @@ typedef struct
 {
     int w, h;                // Source size
     const char *how;         // "png", "jpeg/4", "stb", ...
+    uint32_t inflate_ms;     // PNG: time in zlib inflate
+    uint32_t rows_ms;        // PNG: unfiltering, conversion and scaling
 } imgdec_info_t;
 
 // fill: crop to exactly maxw x maxh; else the whole picture fitted inside.

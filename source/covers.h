@@ -50,8 +50,17 @@ typedef struct
     uint16_t *out;
     uint32_t *acc;           // r, g, b, count per output column
     uint16_t *xmap;          // Source column -> output column
+    uint8_t *xuse;           // Source column sampled (window-relative)
+    uint8_t *yuse;           // Source row sampled (window-relative)
     int oy;                  // Output row being accumulated
 } rowscale_t;
+
+// Rows/columns the scaler samples (at most 3 per output pixel and axis), so
+// decoders can skip converting the others
+static inline bool rs_row_wanted(const rowscale_t *rs, int y)
+{
+    return y >= rs->cy && y < rs->cy + rs->ch && rs->yuse[y - rs->cy];
+}
 
 void rs_geometry(int w, int h, bool fill, int maxw, int maxh, int *cx, int *cy, int *cw,
                  int *ch, int *dw, int *dh);

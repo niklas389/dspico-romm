@@ -90,7 +90,7 @@ static int wifi_level(void)
     if (Wifi_AssocStatus() != ASSOCSTATUS_ASSOCIATED)
         return -1;
     int r = Wifi_GetData(WIFIGETDATA_RSSI, 0, NULL);
-    return r >= 40 ? 3 : r >= 25 ? 2 : 1;
+    return r >= 180 ? 3 : r >= 140 ? 2 : 1; // 202 measured near the AP (-54 dBm)
 }
 
 static void frame(void)
@@ -153,6 +153,13 @@ static bool message(int kind, const char *title, const char *body, const char *h
         if (k & KEY_B)
             return false;
     }
+}
+
+// START: asks before leaving the app (errors exit without asking)
+static bool confirm_quit(void)
+{
+    return message(UI_INFO, "Quit RomM?", "Wi-Fi is switched off and the DSi returns to the "
+                   "launcher.", "A: quit  B: cancel");
 }
 
 // Text console on the bottom screen (log view, speed tests)
@@ -2264,7 +2271,7 @@ static void browse_platform(int platform_id, const char *platform_name,
             if ((k & net_keys) && cw_running)
                 covw_pause(&cw);
             if (k & KEY_START)
-                g_quit = true;
+                g_quit = confirm_quit();
             else if (k & KEY_B)
                 leave = true;
             else if (k & KEY_X)
@@ -2484,7 +2491,7 @@ static void step_platforms(void)
             continue;
         }
         if (k & KEY_START)
-            g_quit = true;
+            g_quit = confirm_quit();
         else if (k & KEY_Y)
         {
             edit = !edit;

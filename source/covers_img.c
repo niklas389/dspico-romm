@@ -52,13 +52,35 @@ bool rs_init(rowscale_t *rs, int w, int h, bool fill, int maxw, int maxh, uint16
     rs_geometry(w, h, fill, maxw, maxh, &rs->cx, &rs->cy, &rs->cw, &rs->ch, &rs->dw, &rs->dh);
     rs->acc = calloc(rs->dw * 4, sizeof(uint32_t));
     rs->xmap = malloc(rs->cw * sizeof(uint16_t));
-    if (!rs->acc || !rs->xmap)
+    rs->xuse = calloc(rs->cw, 1);
+    rs->yuse = calloc(rs->ch, 1);
+    if (!rs->acc || !rs->xmap || !rs->xuse || !rs->yuse)
     {
         rs_free(rs);
         return false;
     }
     for (int x = 0; x < rs->cw; x++)
         rs->xmap[x] = (uint16_t)((long)x * rs->dw / rs->cw);
+    // Up to 3 evenly spaced samples per output pixel and axis (a 10x
+    // reduction averages 9 instead of 100 source pixels)
+    for (int o = 0; o < rs->dw; o++)
+    {
+        int a = (int)((long)o * rs->cw / rs->dw), b = (int)((long)(o + 1) * rs->cw / rs->dw);
+        if (b <= a)
+            b = a + 1;
+        int n = b - a < 3 ? b - a : 3;
+        for (int k = 0; k < n; k++)
+            rs->xuse[a + (b - a) * (2 * k + 1) / (2 * n)] = 1;
+    }
+    for (int o = 0; o < rs->dh; o++)
+    {
+        int a = (int)((long)o * rs->ch / rs->dh), b = (int)((long)(o + 1) * rs->ch / rs->dh);
+        if (b <= a)
+            b = a + 1;
+        int n = b - a < 3 ? b - a : 3;
+        for (int k = 0; k < n; k++)
+            rs->yuse[a + (b - a) * (2 * k + 1) / (2 * n)] = 1;
+    }
     rs->oy = -1;
     return true;
 }
@@ -80,7 +102,7 @@ static void flush(rowscale_t *rs)
 
 void rs_row(rowscale_t *rs, int y, const uint8_t *px, int bpp)
 {
-    if (y < rs->cy || y >= rs->cy + rs->ch)
+    if (!rs_row_wanted(rs, y))
         return;
     int oy = (int)((long)(y - rs->cy) * rs->dh / rs->ch);
     if (oy != rs->oy)
@@ -91,6 +113,8 @@ void rs_row(rowscale_t *rs, int y, const uint8_t *px, int bpp)
     const uint8_t *p = px + rs->cx * bpp;
     for (int x = 0; x < rs->cw; x++, p += bpp)
     {
+        if (!rs->xuse[x])
+            continue;
         uint32_t *a = &rs->acc[rs->xmap[x] * 4];
         uint32_t r = p[0], g = p[1], b = p[2];
         if (bpp == 4 && p[3] != 255)
@@ -118,8 +142,12 @@ void rs_free(rowscale_t *rs)
 {
     free(rs->acc);
     free(rs->xmap);
+    free(rs->xuse);
+    free(rs->yuse);
     rs->acc = NULL;
     rs->xmap = NULL;
+    rs->xuse = NULL;
+    rs->yuse = NULL;
 }
 
 static void whole(const uint8_t *rgb, int w, int h, bool fill, int maxw, int maxh,

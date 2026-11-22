@@ -23,6 +23,11 @@
 static void maybe_yield(void)
 {
 }
+static uint32_t ticks(void)
+{
+    return 0;
+}
+#define TICKS_PER_MS 1
 #else
 #include <nds.h>
 
@@ -37,6 +42,16 @@ static void maybe_yield(void)
         last = cpuGetTiming();
     }
 }
+
+static uint32_t ticks(void)
+{
+    return cpuGetTiming();
+}
+#define TICKS_PER_MS (BUS_CLOCK / 1000)
+
+// zlib state in ITCM when free (unzip.c), like for zip extraction
+extern voidpf unzip_zalloc(voidpf opaque, uInt items, uInt size);
+extern void unzip_zfree(voidpf opaque, voidpf p);
 #endif
 
 static uint32_t be32(const uint8_t *p)
@@ -117,8 +132,13 @@ static int png_stream(const uint8_t *d, size_t len, bool fill, int maxw, int max
     z_stream z;
     memset(&z, 0, sizeof(z));
     int ret = -1;
+#ifndef IMGDEC_HOST
+    z.zalloc = unzip_zalloc;
+    z.zfree = unzip_zfree;
+#endif
     if (!rows || !rgba || inflateInit(&z) != Z_OK)
         goto done;
+    uint32_t t_inf = 0, t_row = 0;
 
     uint8_t *prev = rows, *cur = rows + stride + 1;
     int y = 0, filled = 0;
@@ -152,7 +172,9 @@ static int png_stream(const uint8_t *d, size_t len, bool fill, int maxw, int max
             {
                 z.next_out = cur + filled;
                 z.avail_out = (uInt)(stride + 1 - filled);
+                uint32_t t0 = ticks();
                 int r = inflate(&z, Z_NO_FLUSH);
+                t_inf += ticks() - t0;
                 filled = stride + 1 - (int)z.avail_out;
                 if (r == Z_STREAM_END)
                     zend = true;
@@ -164,11 +186,17 @@ static int png_stream(const uint8_t *d, size_t len, bool fill, int maxw, int max
                         break;
                     continue;
                 }
-                // One complete row: filter byte + data
+                // One complete row: filter byte + data. Every row is
+                // unfiltered (the next one depends on it); only the sampled
+                // rows and columns are converted and scaled.
+                uint32_t t1 = ticks();
                 unfilter(cur + 1, prev + 1, stride, bpp, cur[0]);
                 const uint8_t *s = cur + 1;
-                for (int x = 0; x < w; x++)
+                bool want = rs_row_wanted(&rs, y);
+                for (int x = rs.cx; want && x < rs.cx + rs.cw; x++)
                 {
+                    if (!rs.xuse[x - rs.cx])
+                        continue;
                     uint8_t *o = rgba + x * 4;
                     if (depth < 8)
                     {
@@ -190,7 +218,10 @@ static int png_stream(const uint8_t *d, size_t len, bool fill, int maxw, int max
                         default: o[0] = q[0]; o[1] = q[k]; o[2] = q[2 * k]; o[3] = q[3 * k]; break;
                     }
                 }
-                rs_row(&rs, y++, rgba, 4);
+                if (want)
+                    rs_row(&rs, y, rgba, 4);
+                y++;
+                t_row += ticks() - t1;
                 uint8_t *t = prev;
                 prev = cur;
                 cur = t;
@@ -202,6 +233,8 @@ static int png_stream(const uint8_t *d, size_t len, bool fill, int maxw, int max
             break;
         pos += 12 + clen;
     }
+    info->inflate_ms = t_inf / TICKS_PER_MS;
+    info->rows_ms = t_row / TICKS_PER_MS;
     if (y == h)
     {
         rs_finish(&rs);

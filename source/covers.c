@@ -175,10 +175,12 @@ int cover_fetch(const config_t *cfg, int platform_id, const rom_entry_t *e, int 
                            kind == COV_TILE ? TILE_S : COVER_W,
                            kind == COV_TILE ? TILE_S : COVER_H, px, &ow, &oh, &inf);
         uint32_t t2 = net_now_ms();
-        log_printf("[Cover] %d %s %s: %u B, %dx%d %s, fetch %lu ms, decode %lu ms%s\n", e->id,
+        log_printf("[Cover] %d %s %s: %u B, %dx%d %s, fetch %lu ms, decode %lu ms "
+                   "(inflate %lu, rows %lu)%s\n", e->id,
                    ext_img_k(kind), src[k] == box ? "box2d" : "cover", (unsigned)body.len,
                    inf.w, inf.h, inf.how ? inf.how : "-", (unsigned long)(t1 - t0),
-                   (unsigned long)(t2 - t1), ok ? "" : " FAILED");
+                   (unsigned long)(t2 - t1), (unsigned long)inf.inflate_ms,
+                   (unsigned long)inf.rows_ms, ok ? "" : " FAILED");
         buf_free(&body);
         if (!ok)
             st[k] = 415; // Not decodable: like "no artwork"
