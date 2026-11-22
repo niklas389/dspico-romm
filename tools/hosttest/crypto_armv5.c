@@ -28,6 +28,13 @@ int main(void){ srand(11); int fails=0; static unsigned char in[20000+8],a[20000
   mbedtls_chachapoly_encrypt_and_tag(&c,len,n,aad,al,b+oi,b+oi,t2);
   if(memcmp(a,b+oi,len)||memcmp(t1,t2,16)) fails++;
   if(mbedtls_chachapoly_auth_decrypt(&c,len,n,aad,al,t2,b+oi,b+oi)!=0||memcmp(b+oi,in+oi,len)) fails++;
+  /* decrypt with different input/output alignment, in TLS-like pieces (bounce path) */
+  { static unsigned char ct[20000+8], pt[20000+8]; int ci=rand()%4, po=rand()%4;
+    memcpy(ct+ci,a,len); mbedtls_chachapoly_starts(&c,n,MBEDTLS_CHACHAPOLY_DECRYPT);
+    mbedtls_chachapoly_update_aad(&c,aad,al); size_t q=0;
+    while(q<len){size_t k=rand()%1500+1; if(k>len-q)k=len-q; mbedtls_chachapoly_update(&c,k,ct+ci+q,pt+po+q); q+=k;}
+    unsigned char t3[16]; mbedtls_chachapoly_finish(&c,t3);
+    if(memcmp(pt+po,in+oi,len)||memcmp(t3,t1,16)) fails++; }
   /* streaming poly with odd chunks and unaligned input */
   mbedtls_poly1305_context p1,p2; unsigned char m1[16],m2[16];
   ref_poly1305_init(&p1); ref_poly1305_starts(&p1,key); ref_poly1305_update(&p1,in+oi,len); ref_poly1305_finish(&p1,m1);

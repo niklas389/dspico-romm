@@ -19,6 +19,22 @@
 
 #include "mbedtls/platform.h"
 
+/* dspico-romm: aligned bounce buffer for decryption. OpenSSL's ARMv4
+ * ChaCha20 (CRYPTOGAMS) only takes its word path when input and output are
+ * both 4-byte aligned; otherwise it XORs byte by byte, ~1.5x slower overall.
+ * TLS record bodies sit at arbitrary offsets in the TCP payload, so that was
+ * the case for ~60% of the decrypted data (profile of v0.35). The buffer is
+ * in DTCM: copying in and out costs far less than the byte path. */
+#ifdef __NDS__
+#include <nds/ndstypes.h>
+#define CHACHAPOLY_BOUNCE_ATTR DTCM_BSS
+#else
+#define CHACHAPOLY_BOUNCE_ATTR
+#endif
+#define CHACHAPOLY_PIECE 1024
+static unsigned char chachapoly_bounce[CHACHAPOLY_PIECE]
+    CHACHAPOLY_BOUNCE_ATTR __attribute__((aligned(32)));
+
 #if !defined(MBEDTLS_CHACHAPOLY_ALT)
 
 #define CHACHAPOLY_STATE_INIT       (0)
@@ -184,7 +200,28 @@ int mbedtls_chachapoly_update(mbedtls_chachapoly_context *ctx,
      * cache. The result is identical: both functions are streaming.
      */
     while (len > 0) {
-        size_t n = len < 1024 ? len : 1024;
+        size_t n = len < CHACHAPOLY_PIECE ? len : CHACHAPOLY_PIECE;
+
+        if (ctx->mode == MBEDTLS_CHACHAPOLY_DECRYPT &&
+            (((uintptr_t) input | (uintptr_t) output) & 3U) != 0) {
+            /* MAC over the ciphertext and decryption in place, aligned */
+            memcpy(chachapoly_bounce, input, n);
+            ret = mbedtls_poly1305_update(&ctx->poly1305_ctx, chachapoly_bounce, n);
+            if (ret != 0) {
+                return ret;
+            }
+            ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, n, chachapoly_bounce,
+                                          chachapoly_bounce);
+            if (ret != 0) {
+                return ret;
+            }
+            memcpy(output, chachapoly_bounce, n);
+
+            input += n;
+            output += n;
+            len -= n;
+            continue;
+        }
 
         if (ctx->mode == MBEDTLS_CHACHAPOLY_ENCRYPT) {
             ret = mbedtls_chacha20_update(&ctx->chacha20_ctx, n, input, output);

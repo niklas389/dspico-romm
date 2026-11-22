@@ -79,6 +79,7 @@ Measured on a DSi XL (8 MB ranged download, Mario Kart DS, KB/s):
 | 0.3 | 626 | 394 | 46720 B window, 128 KiB RX ring |
 | 0.9 | 672 | 603 | fast memcpy, crypto in ITCM, SD driver on the ARM9 |
 | 0.10 | 553 | 564 | memcpy call-site statistics enabled (costs ~11 % CPU) |
+| 0.36 | – | – | decryption through a 1 KiB aligned DTCM buffer when TLS data is misaligned (v0.35 profile: ~60 % of ChaCha20 time in the byte path); v0.35: dl net **1259** KB/s, ARM7 ~475 us per packet |
 | 0.35 | – | – | fix: 32-bit FIFO read mode for the combined CMD53 status read (after a block write the bytes stayed in the FIFO and corrupted the next packet: v0.34 lost DHCP); options enabled only after DHCP, switched off automatically if the first request fails. Firmware: HTC 2.0 without bundling |
 | 0.34 | – | – | ARM7 RX: status + lookahead in one CMD53 (`a7cmd53`), SDIO DMA straight into the RX ring (`a7dma`), Wi-Fi firmware info in the log; speed test rows `dl nodec` (TLS records counted, not decrypted) and ChaCha20 alignment |
 | 0.28 | – | – | local ROM index, detail view, hideable platforms |
